@@ -5,15 +5,15 @@ Auteur : Blazefive · Mastère Cybersécurité 4A · 29/07/2026
 
 Environnement : WSL2 Ubuntu (travail dans `~`, jamais dans `/mnt/c` — leçon du module 1).
 
-Dépôt distant **réel** : <https://github.com/Blazefive/tp-iac-regis> (privé). Les commits sont
-signés en SSH et **vérifiés** sur GitHub (badge *Verified* — l'API renvoie `"verified": true,
-"reason": "valid"`).
+Dépôt distant **réel** : <https://github.com/Blazefive/tp-iac-regis>. Les commits sont signés en SSH
+et **vérifiés** sur GitHub (badge *Verified* — l'API renvoie `"verified": true, "reason": "valid"`).
 
-Seule limite : la **protection de branche** est démontrée **en local** (hook `pre-receive`). GitHub
-réserve cette fonctionnalité aux dépôts publics ou au plan Pro pour les dépôts **privés** ; l'API
-renvoie `403 « Upgrade to GitHub Pro or make this repository public »`. On garde donc le dépôt privé
-(conforme au TP) et on démontre le mécanisme localement — c'est une vraie contrainte de plan, pas un
-raccourci.
+Note sur la visibilité : le TP demande un dépôt privé, mais GitHub réserve la **protection de
+branche** aux dépôts **publics** (ou au plan Pro pour les privés) — sur un privé gratuit l'API renvoie
+`403 « Upgrade to GitHub Pro or make this repository public »`. Pour disposer d'une protection de
+branche **réelle**, le dépôt a donc été passé en **public**. Il ne contient aucun secret : la fausse
+clé de la partie C a été purgée de l'historique **avant** tout push vers GitHub. La protection est
+active côté serveur (voir partie D).
 
 Dépôt local de travail : `~/tp-iac-regis`
 
@@ -80,11 +80,14 @@ git verify-commit HEAD
 Good "git" signature for 116870999+Blazefive@users.noreply.github.com with ED25519 key (empreinte SSH publique)
 ```
 
-Protection de la branche `main` (hook `pre-receive`) → **push direct refusé** :
+Protection de la branche `main` activée **sur GitHub** (push direct interdit, 1 revue obligatoire,
+force-push et suppression interdits, règle appliquée aussi aux administrateurs). Un `git push` direct
+sur `main` est **refusé** par le serveur :
 
 ```
-remote: [protection] push direct sur 'main' interdit - passez par une pull request.
- ! [remote rejected] main -> main (pre-receive hook declined)
+remote: error: GH006: Protected branch update failed for refs/heads/main.
+remote: - Changes must be made through a pull request.
+ ! [remote rejected] main -> main (protected branch hook declined)
 error: failed to push some refs
 ```
 
