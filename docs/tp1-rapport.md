@@ -1,25 +1,6 @@
 # TP1 — Un dépôt IaC sain, de bout en bout
 
 **Module 2 — Gestion des configurations et Git**
-Auteur : Blazefive · Mastère Cybersécurité 4A · 29/07/2026
-
-Environnement : WSL2 Ubuntu (travail dans `~`, jamais dans `/mnt/c` — leçon du module 1).
-
-Dépôt distant **réel** : <https://github.com/Blazefive/tp-iac-regis>. Les commits sont signés en SSH
-et **vérifiés** sur GitHub (badge *Verified* — l'API renvoie `"verified": true, "reason": "valid"`).
-
-Note sur la visibilité : le TP demande un dépôt privé, mais GitHub réserve la **protection de
-branche** aux dépôts **publics** (ou au plan Pro pour les privés) — sur un privé gratuit l'API renvoie
-`403 « Upgrade to GitHub Pro or make this repository public »`. Pour disposer d'une protection de
-branche **réelle**, le dépôt a donc été passé en **public**. Il ne contient aucun secret : la fausse
-clé de la partie C a été purgée de l'historique **avant** tout push vers GitHub. La protection est
-active côté serveur (voir partie D).
-
-Dépôt local de travail : `~/tp-iac-regis`
-
----
-
-## Ce que j'ai fait
 
 ### Partie A — Initialisation
 Dépôt `tp-iac-regis` (branche `main`) avec, à la racine : `.gitattributes` (LF), `.gitignore`
