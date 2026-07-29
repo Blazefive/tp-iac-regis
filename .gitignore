@@ -1,0 +1,35 @@
+# ---- Terraform -------------------------------------------------------------
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+.terraform.tfstate.lock.info
+# on VERSIONNE en revanche le lock des providers
+!.terraform.lock.hcl
+
+# ---- Secrets et environnements ---------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials
+.aws/
+.azure/
+*.retry
+
+# ---- Systemes --------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
