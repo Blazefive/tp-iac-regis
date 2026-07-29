@@ -4,11 +4,18 @@
 Auteur : Blazefive · Mastère Cybersécurité 4A · 29/07/2026
 
 Environnement : WSL2 Ubuntu (travail dans `~`, jamais dans `/mnt/c` — leçon du module 1).
-Le dépôt distant est simulé par un dépôt *bare* local (`origin`), faute d'accès GitHub sur la
-machine ; la protection de branche est reproduite par un hook `pre-receive`. Tout le reste (Git,
-pre-commit, gitleaks, git-filter-repo, signature SSH) est réel et exécuté.
 
-Dépôt : `~/tp-iac-regis`
+Dépôt distant **réel** : <https://github.com/Blazefive/tp-iac-regis> (privé). Les commits sont
+signés en SSH et **vérifiés** sur GitHub (badge *Verified* — l'API renvoie `"verified": true,
+"reason": "valid"`).
+
+Seule limite : la **protection de branche** est démontrée **en local** (hook `pre-receive`). GitHub
+réserve cette fonctionnalité aux dépôts publics ou au plan Pro pour les dépôts **privés** ; l'API
+renvoie `403 « Upgrade to GitHub Pro or make this repository public »`. On garde donc le dépôt privé
+(conforme au TP) et on démontre le mécanisme localement — c'est une vraie contrainte de plan, pas un
+raccourci.
+
+Dépôt local de travail : `~/tp-iac-regis`
 
 ---
 
