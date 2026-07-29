@@ -77,7 +77,7 @@ signé de l'ADR :
 
 ```
 git verify-commit HEAD
-Good "git" signature for 116870999+Blazefive@users.noreply.github.com with ED25519 key (empreinte SSH publique)
+Good "git" signature for <email GitHub noreply> with ED25519 key (empreinte SSH publique)
 ```
 
 Protection de la branche `main` activée **sur GitHub** (push direct interdit, 1 revue obligatoire,
