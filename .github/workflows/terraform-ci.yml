@@ -1,0 +1,125 @@
+name: terraform-ci
+
+# `pull_request`, never `pull_request_target`.
+#
+# That distinction is the whole security model of this file. `pull_request` runs
+# the fork's code with a read-only GITHUB_TOKEN and NO repository secrets.
+# `pull_request_target` would run in this repository's context, WITH the secrets,
+# against code written by whoever opened the pull request. That combination is
+# CICD-SEC-04 in the OWASP CI/CD Top 10 and it is how credentials get stolen.
+on:
+  pull_request:
+    paths:
+      - "envs/**"
+      - "ansible/**"
+      - ".github/workflows/**"
+  workflow_dispatch: {}
+
+# Least privilege at the workflow level. Jobs cannot widen this.
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+  # Terraform reads TF_VAR_* from the environment, so no .tfvars file is ever
+  # written to the runner disk.
+  TF_VAR_admin_cidr: ${{ vars.ADMIN_CIDR }}
+  TF_VAR_vpc_id: ${{ vars.VPC_ID }}
+  TF_VAR_ansible_control_public_key: ${{ vars.ANSIBLE_PUBLIC_KEY }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Runs for EVERY pull request, forks included. It has no credentials and no
+  # backend, so there is nothing here worth attacking.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: fmt, validate, syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        # Actions are pinned by commit SHA, not by tag. A tag is a mutable
+        # pointer: CVE-2025-30066 (tj-actions/changed-files) was exactly this -
+        # version tags rewritten to a malicious commit, and every workflow using
+        # @vX executed it without a single line of their own repo changing.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -recursive -check -diff
+
+      - name: terraform validate
+        # -backend=false: no bucket, no credentials, no state. Syntax and
+        # internal consistency only.
+        run: |
+          terraform -chdir=envs/dev-aws init -backend=false -input=false
+          terraform -chdir=envs/dev-aws validate
+
+      - name: ansible syntax check
+        run: |
+          pip install --quiet ansible-core
+          cd ansible
+          ansible-playbook playbook.yml --syntax-check
+          ansible-playbook web.yml --syntax-check
+
+  # ---------------------------------------------------------------------------
+  # Only for branches of THIS repository. A fork pull request skips this job
+  # entirely, so credentials are never exposed to unreviewed code.
+  #
+  # This guard matters more than it looks: `terraform plan` is NOT read-only. A
+  # local-exec provisioner, an `external` or `http` data source, or a malicious
+  # provider all execute on the runner during plan. Pen Test Partners showed a
+  # token holding only "plan" permission is enough to extract a runner's AWS
+  # credentials.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: plan
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-3
+
+      - name: terraform init
+        run: >-
+          terraform -chdir=envs/dev-aws init -input=false
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+
+      - name: terraform plan
+        run: terraform -chdir=envs/dev-aws plan -out=dev.tfplan -input=false -no-color
+
+      - name: Summarise the plan
+        # The plan is summarised, NOT uploaded as an artifact. A .tfplan holds
+        # every planned attribute value, and artifacts on a public repository are
+        # downloadable by anyone who can read it. HashiCorp rates plan files as
+        # sensitive as the state file.
+        run: |
+          {
+            echo '### Plan'
+            echo '```'
+            terraform -chdir=envs/dev-aws show -json dev.tfplan \
+              | jq -r '.resource_changes[] | "\(.change.actions | join(","))\t\(.address)"'
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
