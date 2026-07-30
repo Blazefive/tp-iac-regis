@@ -22,10 +22,33 @@ variable "admin_cidr" {
   }
 }
 
-variable "ami_name_pattern" {
-  description = "AMI name filter. Pins distribution, release, architecture and root device type."
+variable "ansible_control_public_key" {
+  description = "Public key of the Ansible control node, appended to the default user's authorized_keys so configuration management can reach the instance."
   type        = string
-  default     = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+
+  validation {
+    condition     = can(regex("^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) AAAA", var.ansible_control_public_key))
+    error_message = "ansible_control_public_key must be an OpenSSH public key, not a path and not a private key."
+  }
+}
+
+variable "ami_name_pattern" {
+  # PINNED TO AN EXACT BUILD, no trailing wildcard, on purpose.
+  #
+  # Two reasons, and the second one is not theoretical:
+  #
+  # 1. `most_recent = true` on a wildcard is non-deterministic. Canonical
+  #    publishes a new image every few weeks, so the same code resolves a
+  #    different AMI over time and the next plan proposes to replace the
+  #    instance - a change nobody asked for.
+  #
+  # 2. This training account allowlists AMIs by id in its IAM policy. The
+  #    wildcard resolved to the 20260714 build and RunInstances was refused with
+  #    an explicit deny; 20260610 is the build every other student is running.
+  #    An unpinned AMI is therefore not merely untidy here, it does not launch.
+  description = "Exact AMI name. Pinned rather than a wildcard: reproducibility, and this account allowlists AMI ids."
+  type        = string
+  default     = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260610"
 }
 
 variable "ami_owner_id" {
@@ -42,6 +65,17 @@ variable "availability_zone_suffix" {
   validation {
     condition     = can(regex("^[a-c]$", var.availability_zone_suffix))
     error_message = "availability_zone_suffix must be a, b or c."
+  }
+}
+
+variable "instance_name" {
+  description = "Name tag of the EC2 instance, as shown in the console."
+  type        = string
+  default     = "Régis"
+
+  validation {
+    condition     = length(var.instance_name) > 0 && length(var.instance_name) <= 255
+    error_message = "instance_name must be between 1 and 255 characters."
   }
 }
 
@@ -69,9 +103,24 @@ variable "project" {
 }
 
 variable "public_subnet_cidr" {
-  description = "Address range of the public subnet. Must sit inside vpc_cidr."
+  # The default VPC is shared with the rest of the class. Taken ranges at the
+  # time of writing: 172.31.0.0/24, .100.0/24, .200.0/24, .240.0/24. Check before
+  # changing this:
+  #   aws ec2 describe-subnets --filters Name=vpc-id,Values=<vpc> \
+  #     --query 'Subnets[].CidrBlock'
+  description = "Address range of the public subnet. Must sit inside the VPC range and overlap no existing subnet."
   type        = string
-  default     = "10.20.1.0/24"
+  default     = "172.31.50.0/24"
+}
+
+variable "vpc_id" {
+  description = "Existing VPC to attach to. Read as a data source, never managed: see the note in main.tf."
+  type        = string
+
+  validation {
+    condition     = can(regex("^vpc-[0-9a-f]{8,17}$", var.vpc_id))
+    error_message = "vpc_id must look like vpc-0123456789abcdef0."
+  }
 }
 
 variable "region" {

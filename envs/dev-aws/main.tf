@@ -51,38 +51,67 @@ locals {
 }
 
 # --------------------------------------------------------------- Networking ---
+#
+# The VPC and its internet gateway are READ, not created.
+#
+# Why: the training AWS account is shared, and eu-west-3 sits at its quota of 5
+# VPCs, all belonging to other students. Every other region is refused by an
+# explicit deny in the account IAM policy, so there is nowhere else to go.
+# Deleting someone else's VPC to make room is not an option.
+#
+# What this costs: the root module no longer owns the VPC or the gateway, so
+# `terraform destroy` cannot remove them - which is correct, they were never
+# ours. Everything else stays managed: subnet, route table, association,
+# security group, key pair, instance.
 
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = { Name = "${local.prefix}-vpc" }
+data "aws_vpc" "main" {
+  id = var.vpc_id
 }
 
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-
-  tags = { Name = "${local.prefix}-igw" }
+data "aws_internet_gateway" "main" {
+  filter {
+    name   = "attachment.vpc-id"
+    values = [data.aws_vpc.main.id]
+  }
 }
 
 # On AWS a subnet lives in exactly ONE availability zone: high availability is
 # written into the topology, not into the resource.
 resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.main.id
+  vpc_id                  = data.aws_vpc.main.id
   cidr_block              = var.public_subnet_cidr
   availability_zone       = "${var.region}${var.availability_zone_suffix}"
   map_public_ip_on_launch = true
 
   tags = { Name = "${local.prefix}-public-${var.availability_zone_suffix}" }
+
+  lifecycle {
+    precondition {
+      # AWS rejects an out-of-range subnet anyway, but failing here names the
+      # problem instead of surfacing InvalidSubnet.Range. Getting this wrong in a
+      # VPC shared with the rest of the class is a real incident.
+      #
+      # There is no cidrcontains() in Terraform 1.15 - it is an OpenTofu
+      # function. Equivalent with core functions: mask the subnet base address
+      # with the VPC prefix length and it must give the VPC base address back.
+      condition = cidrhost(
+        "${cidrhost(var.public_subnet_cidr, 0)}/${split("/", data.aws_vpc.main.cidr_block)[1]}", 0
+      ) == cidrhost(data.aws_vpc.main.cidr_block, 0)
+
+      error_message = "public_subnet_cidr must sit inside the VPC range ${data.aws_vpc.main.cidr_block}."
+    }
+  }
 }
 
+# Our own route table rather than the VPC main one: the default route table is
+# shared with every other subnet in this VPC, so editing it would change routing
+# for other people's instances.
 resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
+  vpc_id = data.aws_vpc.main.id
 
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
+    gateway_id = data.aws_internet_gateway.main.id
   }
 
   tags = { Name = "${local.prefix}-rt-public" }
@@ -109,7 +138,7 @@ resource "aws_route_table_association" "public" {
 resource "aws_security_group" "web" {
   name        = "${local.prefix}-web"
   description = "Public HTTP - SSH restricted to the admin host"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = data.aws_vpc.main.id
 
   ingress {
     description = "HTTP from the Internet"
@@ -191,10 +220,20 @@ resource "aws_instance" "web" {
     #!/bin/bash
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
+
     apt-get update -y
     apt-get install -y --no-install-recommends nginx
     echo "<h1>${local.prefix} - deployed by Terraform</h1>" >/var/www/html/index.html
     systemctl enable --now nginx
+
+    # Authorise the Ansible control node on the default user. Terraform creates
+    # the host and gets it serving; Ansible takes over from there. Without this
+    # the instance is unreachable to configuration management, and the only way
+    # in is the operator laptop -- which does not scale and is not auditable.
+    install -d -m 700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
+    printf '%s\n' '${var.ansible_control_public_key}' >>/home/ubuntu/.ssh/authorized_keys
+    chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+    chmod 600 /home/ubuntu/.ssh/authorized_keys
   EOT
 
   # Without this line, changing user_data changes NOTHING on a running instance:
@@ -203,7 +242,10 @@ resource "aws_instance" "web" {
   # the immutable model.
   user_data_replace_on_change = true
 
-  tags = { Name = "${local.prefix}-web" }
+  # Tag VALUES accept Unicode, unlike security group descriptions, which AWS
+  # restricts to ^[0-9A-Za-z_ .:/()#,@\[\]+=&;{}!$*-]*$ - no accent, no
+  # apostrophe. So the accented name is fine here and would be rejected there.
+  tags = { Name = var.instance_name }
 }
 
 # Assertion re-evaluated on every plan and apply, after the state refresh: this

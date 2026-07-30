@@ -14,6 +14,11 @@
 # Your public IP as a /32. Never 0.0.0.0/0 - two validation blocks reject it.
 admin_cidr = "SET_ME/32"
 
+# Public key of the Ansible control node, so configuration management can reach
+# the instance once Terraform has created it.
+#   on the control node:  cat ~/.ssh/id_ed25519.pub
+ansible_control_public_key = "ssh-ed25519 AAAA... ansible-control@host"
+
 # ---- Identity and placement -------------------------------------------------
 
 # The training AWS account is shared between students: put your name here, or
