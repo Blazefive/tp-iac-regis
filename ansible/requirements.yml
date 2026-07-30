@@ -1,0 +1,17 @@
+---
+# Collections this project needs beyond ansible-core.
+#
+#   ansible-galaxy collection install -r requirements.yml
+#
+# The `ansible` distribution package bundles all of these, so a control node
+# installed from apt already has them. A CI runner with only ansible-core does
+# not, hence this file.
+#
+# Versions are floors, not pins: `>=` on a collection is the usual practice
+# because collections follow semantic versioning. Pin exactly if a run ever has
+# to be reproducible to the byte.
+collections:
+  - name: community.mysql
+    version: ">=3.10.0"
+  - name: community.general
+    version: ">=10.0.0"

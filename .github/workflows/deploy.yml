@@ -115,7 +115,12 @@ jobs:
 
       - name: Install Ansible
         if: inputs.action == 'deploy'
-        run: pip install --quiet ansible-core
+        # ansible-core alone lacks community.mysql, which the GLPI playbook uses
+        # to create the database and its user. A control node installed from apt
+        # gets the whole bundle; a runner does not.
+        run: |
+          pip install --quiet ansible-core
+          ansible-galaxy collection install -r ansible/requirements.yml
 
       - name: Prepare the SSH key
         if: inputs.action == 'deploy'
@@ -159,10 +164,10 @@ jobs:
           [web:vars]
           ansible_user=ubuntu
           EOF
-          ansible-playbook -i ci-inventory.ini web.yml
+          ansible-playbook -i ci-inventory.ini glpi.yml
           # A second pass must change nothing. If it does, the playbook describes
           # actions instead of a state, and the run should fail.
-          ansible-playbook -i ci-inventory.ini web.yml | tee second.log
+          ansible-playbook -i ci-inventory.ini glpi.yml | tee second.log
           grep -q "changed=0" second.log || { echo "playbook is not idempotent"; exit 1; }
 
       - name: Report

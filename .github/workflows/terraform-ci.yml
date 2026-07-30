@@ -68,7 +68,7 @@ jobs:
           pip install --quiet ansible-core
           cd ansible
           ansible-playbook playbook.yml --syntax-check
-          ansible-playbook web.yml --syntax-check
+          ansible-playbook glpi.yml --syntax-check
 
   # ---------------------------------------------------------------------------
   # Only for branches of THIS repository. A fork pull request skips this job
