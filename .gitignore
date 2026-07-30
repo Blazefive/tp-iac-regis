@@ -5,7 +5,20 @@
 *.tfvars
 !*.tfvars.example
 
-# Secrets / environnement
+# Saved plans: the binary format holds every planned value, secrets included.
+# HashiCorp rates them as sensitive as the state file itself.
+*.tfplan
+*.tfplan.json
+
+# Override files are local by design (HashiCorp docs): they must never be
+# committed, or they silently redirect the backend on someone else's machine.
+*_override.tf
+
+# Partial backend configuration: holds the bucket name, hence the AWS account id.
+backend.hcl
+!backend.hcl.example
+
+# Secrets / environment
 .env
 .env.*
 *.pem
@@ -13,3 +26,6 @@
 *.p12
 *.pfx
 credentials
+
+# Local output (plan logs, screenshots)
+out/
