@@ -17,10 +17,19 @@ name: pipeline
 on:
   workflow_dispatch:
     inputs:
-      destroy_after:
-        description: "Destroy the instance at the end (cost control)"
-        type: boolean
-        default: false
+      action:
+        description: "Ce que fait cette execution"
+        type: choice
+        default: deploy
+        options:
+          # Deploie et LAISSE l'instance en vie : le seul mode qui donne un lien
+          # utilisable. Elle facture jusqu'a la destruction.
+          - deploy
+          # Deploie, verifie, puis detruit dans la foulee. Le lien affiche est
+          # deja mort : mode controle, pas mode demonstration.
+          - deploy-puis-detruire
+          # Detruit une instance laissee en vie par une execution precedente.
+          - detruire
   pull_request:
     paths: ["envs/**", "ansible/**", "Makefile", ".github/workflows/**"]
 
@@ -177,11 +186,13 @@ jobs:
       # ---- STEP 2 -------------------------------------------------------
       - name: make apply
         # Re-runs make verify as a prerequisite before touching AWS.
+        if: inputs.action != 'detruire'
         run: make apply
 
       # ---- SSH access for this run only ---------------------------------
       - name: Open SSH for this runner only
         id: jit
+        if: inputs.action != 'detruire'
         # Hosted runners draw from huge dynamic ranges, so the security group
         # cannot allowlist them in advance, and opening 22 to the world would
         # throw away the point of the exercise. Instead: authorise this one
@@ -201,25 +212,47 @@ jobs:
       # ---- STEP 3 -------------------------------------------------------
       - name: make inventory
         id: inventory
+        if: inputs.action != 'detruire'
         run: |
           make inventory
           echo "ip=$(terraform -chdir=envs/dev-aws output -raw instance_public_ip)" >>"$GITHUB_OUTPUT"
 
       # ---- STEP 4 -------------------------------------------------------
       - name: make configure
+        if: inputs.action != 'detruire'
         run: make configure
 
-      - name: Report
+      - name: Lien et etat
+        if: inputs.action != 'detruire'
+        # Deux affichages, pas un. Le resume de job est riche mais il faut ouvrir
+        # le run pour le voir ; une annotation ::notice:: apparait directement en
+        # tete de la page du run et dans la liste des executions.
         run: |
+          ip='${{ steps.inventory.outputs.ip }}'
+          url="http://$ip:8080/"
+
+          if [ '${{ inputs.action }}' = 'deploy' ]; then
+            echo "::notice title=Application en ligne::$url"
+            etat='**en vie** — elle facture jusqu'"'"'a destruction'
+            suite='Relancer ce workflow avec l'"'"'action **detruire** quand vous avez fini.'
+          else
+            echo "::notice title=Deploiement verifie puis detruit::$url (lien deja mort)"
+            etat='**detruite** dans la foulee'
+            suite='Pour un lien utilisable, relancer avec l'"'"'action **deploy**.'
+          fi
+
           {
-            echo "### Déployé"
+            echo "## Application deployee"
+            echo ""
+            echo "# $url"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Adresse | \`${{ steps.inventory.outputs.ip }}\` |"
-            echo "| URL | http://${{ steps.inventory.outputs.ip }}:8080/ |"
+            echo "| Adresse IP | \`$ip\` |"
+            echo "| SSH | \`ssh ubuntu@$ip\` — depuis l'adresse d'administration |"
+            echo "| Instance | $etat |"
             echo ""
-            echo "L'instance facture. Relancer avec \`destroy_after\` ou \`make destroy\`."
+            echo "$suite"
           } >>"$GITHUB_STEP_SUMMARY"
 
       # ---- Teardown -----------------------------------------------------
@@ -234,9 +267,19 @@ jobs:
             || echo "règle déjà absente"
           echo "révoqué ${{ steps.jit.outputs.cidr }}"
 
-      - name: Destroy on request
-        if: always() && inputs.destroy_after
-        run: make destroy-auto
+      - name: Destruction
+        # always() pour que le mode "deploy-puis-detruire" nettoie meme si le
+        # playbook a echoue : sinon un echec laisserait une instance a facturer,
+        # ce qui est exactement le contraire du but.
+        if: always() && inputs.action != 'deploy'
+        run: |
+          make destroy-auto
+          echo "::notice title=Instance detruite::plus rien ne facture"
+          {
+            echo ""
+            echo "### Destruction"
+            echo "Instance detruite, rien ne facture."
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Remaining ingress rules
         if: always() && steps.jit.outputs.sg != ''
