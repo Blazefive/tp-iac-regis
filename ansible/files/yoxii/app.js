@@ -1,10 +1,6 @@
-// Yoxii - multiplayer client.
-//
-// This file draws and sends intents. It decides nothing: the server owns the
-// rules and tells us, in every snapshot, which cells are legal. Keeping one
-// copy of the rules is what stops the two sides from drifting apart, and it is
-// also what makes cheating pointless - a doctored client can send whatever it
-// likes and simply be refused.
+// Yoxii - multiplayer client. Draws and sends intents, decides nothing: the
+// server owns the rules and marks the legal cells in every snapshot. One copy
+// of the rules, so a doctored client is simply refused.
 "use strict";
 
 const SIZE = 7;

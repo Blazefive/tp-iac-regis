@@ -1,10 +1,8 @@
 # Inputs, alphabetical. Every variable has a description and a safe default,
-# except admin_cidr which must be supplied.
+# except admin_cidr, ansible_control_public_key and vpc_id.
 #
-# Deliberately NOT variables: root volume encryption, http_tokens, hop limit,
-# and the service ports. Exposing a security control as a variable makes it
-# optional, and an optional control is how misconfiguration gets industrialised.
-# See main.tf.
+# Deliberately NOT variables: root volume encryption, http_tokens, hop limit and
+# the service ports. A security control exposed as a variable becomes optional.
 
 variable "admin_cidr" {
   description = "Your public IP as a /32. The only source allowed on SSH. Get it with `make ip`."
@@ -15,7 +13,6 @@ variable "admin_cidr" {
     error_message = "admin_cidr must be a single address in /32, not a range."
   }
 
-  # The most common mistake in the world, and the one part D simulates.
   validation {
     condition     = !startswith(var.admin_cidr, "0.0.0.0")
     error_message = "admin_cidr must never open SSH to 0.0.0.0/0."
@@ -33,19 +30,11 @@ variable "ansible_control_public_key" {
 }
 
 variable "ami_name_pattern" {
-  # PINNED TO AN EXACT BUILD, no trailing wildcard, on purpose.
-  #
-  # Two reasons, and the second one is not theoretical:
-  #
-  # 1. `most_recent = true` on a wildcard is non-deterministic. Canonical
-  #    publishes a new image every few weeks, so the same code resolves a
-  #    different AMI over time and the next plan proposes to replace the
-  #    instance - a change nobody asked for.
-  #
-  # 2. This training account allowlists AMIs by id in its IAM policy. The
-  #    wildcard resolved to the 20260714 build and RunInstances was refused with
-  #    an explicit deny; 20260610 is the build every other student is running.
-  #    An unpinned AMI is therefore not merely untidy here, it does not launch.
+  # Pinned to an exact build, no trailing wildcard. `most_recent` on a wildcard
+  # is non-deterministic: Canonical publishes every few weeks, so the same code
+  # resolves a different AMI over time and the next plan proposes to replace the
+  # instance. This account also allowlists AMIs by id - the wildcard resolved to
+  # a newer build and RunInstances was refused with an explicit deny.
   description = "Exact AMI name. Pinned rather than a wildcard: reproducibility, and this account allowlists AMI ids."
   type        = string
   default     = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260610"
@@ -69,13 +58,8 @@ variable "availability_zone_suffix" {
 }
 
 variable "http_cidr" {
-  # null means "the same as admin_cidr", i.e. restricted. That is the fail-safe
-  # default: opening the service to the internet has to be written down
-  # explicitly, it is never what you get by forgetting to set a value.
-  #
-  # What this host serves is GLPI, an administration console with well-known
-  # default accounts (glpi/glpi, tech/tech...). A public website belongs on
-  # 0.0.0.0/0; an admin console does not.
+  # null means "same as admin_cidr". Fail-safe default: opening a service to the
+  # internet has to be written down, never obtained by forgetting a value.
   description = "Source allowed on port 80. Leave null to restrict it to admin_cidr; set 0.0.0.0/0 only for a genuinely public site."
   type        = string
   default     = null
@@ -87,9 +71,6 @@ variable "http_cidr" {
 }
 
 variable "game_port" {
-  # A second service on its own port, deliberately separate from 80. What runs
-  # on 80 here is an administration console; what runs here is a public game.
-  # Different audiences, different exposure, so a different rule.
   description = "TCP port of the public game. Set game_cidr to control who reaches it."
   type        = number
   default     = 8080
@@ -101,17 +82,14 @@ variable "game_port" {
 }
 
 variable "game_cidr" {
-  # Unlike http_cidr, this one defaults to null too: nothing is exposed unless
-  # someone writes it down.
   description = "Source allowed on game_port. Leave unset to restrict to admin_cidr; set 0.0.0.0/0 to open it to everyone."
   type        = string
   default     = null
 
   validation {
-    # The empty string counts as unset, not as an error. A CI job cannot easily
-    # omit an environment variable: TF_VAR_game_cidr always exists and carries ""
-    # when the run is private. coalesce() already skips empty strings, so the
-    # only thing that had to change was this guard.
+    # The empty string counts as unset: a CI job cannot omit an environment
+    # variable, so TF_VAR_game_cidr always exists and carries "" in private
+    # mode. coalesce() already skips empty strings.
     condition     = var.game_cidr == null || var.game_cidr == "" || can(cidrhost(var.game_cidr, 0))
     error_message = "game_cidr must be a valid CIDR block, empty, or null."
   }
@@ -152,9 +130,7 @@ variable "project" {
 }
 
 variable "public_subnet_cidr" {
-  # The default VPC is shared with the rest of the class. Taken ranges at the
-  # time of writing: 172.31.0.0/24, .100.0/24, .200.0/24, .240.0/24. Check before
-  # changing this:
+  # The default VPC is shared with the rest of the class. Check before changing:
   #   aws ec2 describe-subnets --filters Name=vpc-id,Values=<vpc> \
   #     --query 'Subnets[].CidrBlock'
   description = "Address range of the public subnet. Must sit inside the VPC range and overlap no existing subnet."
@@ -200,8 +176,3 @@ variable "ssh_public_key_path" {
   type        = string
   default     = "~/.ssh/tp2_ed25519.pub"
 }
-
-# vpc_cidr was removed: the VPC is read as a data source, not created here, so
-# the variable had no reader left. tflint's terraform_unused_declarations rule
-# caught it - which is the whole point of running a linter over infrastructure
-# code rather than only asking whether it parses.

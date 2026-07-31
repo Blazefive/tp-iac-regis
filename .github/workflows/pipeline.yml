@@ -1,19 +1,12 @@
 name: pipeline
 
-# TRIGGER (the assignment leaves the choice open):
+# workflow_dispatch runs the full chain: on a public repository it is the
+# smallest attack surface, no fork can start it, and a human stays in front of
+# every apply. pull_request runs STEP 1 only, with no credentials, so a fork can
+# be linted safely.
 #
-#   workflow_dispatch  the full chain, manually. On a PUBLIC repository this is
-#                      the smallest attack surface there is - no fork can start
-#                      it - and it keeps a human in front of every apply, which
-#                      is the plan/apply control point the course insists on.
-#
-#   pull_request       STEP 1 only. Validation runs on every proposed change,
-#                      with no credentials and nothing deployed, so a fork can
-#                      be linted safely.
-#
-# `pull_request`, never `pull_request_target`: the latter would run the fork's
-# code in THIS repository's context, with the secrets. That is CICD-SEC-04 in
-# the OWASP CI/CD Top 10 and it is how credentials get stolen.
+# pull_request, never pull_request_target: the latter runs the fork's code in
+# this repository's context, with the secrets (OWASP CI/CD Top 10, CICD-SEC-04).
 on:
   workflow_dispatch:
     inputs:
@@ -22,25 +15,16 @@ on:
         type: choice
         default: deploy
         options:
-          # Deploie et LAISSE l'instance en vie : le seul mode qui donne un lien
-          # utilisable. Elle facture jusqu'a la destruction.
-          - deploy
-          # Deploie, verifie, puis detruit dans la foulee. Le lien affiche est
-          # deja mort : mode controle, pas mode demonstration.
-          - deploy-puis-detruire
-          # Detruit une instance laissee en vie par une execution precedente.
-          - detruire
+          - deploy # laisse l'instance en vie : le seul mode qui donne un lien utilisable
+          - deploy-puis-detruire # deploie, verifie, detruit : mode controle
+          - detruire # detruit une instance laissee par une execution precedente
       acces:
         description: "Qui peut atteindre l'application"
         type: choice
         default: prive
         options:
-          # Le port applicatif n'accepte que l'adresse d'administration. Defaut
-          # sur : ouvrir au monde doit s'ecrire, jamais s'obtenir par oubli.
-          - prive
-          # Le port applicatif est ouvert a 0.0.0.0/0. SSH reste restreint dans
-          # les deux cas - c'est l'application qu'on partage, pas la machine.
-          - public
+          - prive # port applicatif restreint a l'adresse d'administration
+          - public # port applicatif ouvert a tous ; SSH reste restreint
   pull_request:
     paths: ["envs/**", "ansible/**", "Makefile", ".github/workflows/**"]
 
@@ -58,42 +42,33 @@ env:
   TF_IN_AUTOMATION: "true"
   AWS_REGION: eu-west-3
   # Terraform reads TF_VAR_* from the environment, so no .tfvars file is ever
-  # written to the runner disk. The two key-related variables are NOT here: they
-  # are derived from the private key secret in the "Prepare the SSH key" step,
-  # so the key material has a single source.
-  # Des SECRETS, pas des variables de depot - et la nuance n'est pas cosmetique.
-  # Sur un depot public les journaux d'execution sont publics eux aussi, et
-  # GitHub ne masque QUE les secrets. En variables, ces deux valeurs
-  # apparaissaient en clair 35 fois par execution : l'adresse IP personnelle de
-  # l'administrateur, donc son fournisseur d'acces et sa localisation
-  # approximative, dans un journal permanent lie a un compte nomme.
+  # written to the runner disk. The key-related variables are absent here: they
+  # are derived from the private key secret in "Prepare the SSH key".
   #
-  # Le masquage reste une substitution de chaine : il couvre la valeur exacte,
-  # pas une forme derivee. D'ou le stockage sous la forme /32, celle que
-  # Terraform et l'AWS CLI impriment reellement.
+  # Secrets rather than repository variables: on a public repository the run
+  # logs are public too, and GitHub masks only secrets. Masking is string
+  # substitution, so the value is stored in the /32 form actually printed.
   TF_VAR_admin_cidr: ${{ secrets.ADMIN_CIDR }}
   TF_VAR_vpc_id: ${{ secrets.VPC_ID }}
-  # Vide en mode prive : la variable Terraform retombe alors sur son defaut
-  # `null`, et coalesce() restreint le port applicatif a admin_cidr.
+  # Empty in private mode: the Terraform variable falls back to null and
+  # coalesce() restricts the port to admin_cidr.
   TF_VAR_game_cidr: ${{ inputs.acces == 'public' && '0.0.0.0/0' || '' }}
 
 jobs:
   # ===========================================================================
   # STEP 1 - Validation of the infrastructure code
   #
-  # No AWS credentials in this job at all. It reads the repository, runs three
-  # linters and stops. There is nothing here worth attacking, which is what
-  # makes it safe to run on a fork's pull request.
+  # No AWS credentials in this job at all: it reads the repository, runs three
+  # linters and stops. Nothing here is worth attacking.
   # ===========================================================================
   validate:
     name: "1. fmt / tflint / trivy"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        # Actions are pinned by commit SHA, not by tag. A tag is a mutable
-        # pointer: CVE-2025-30066 (tj-actions/changed-files) was exactly that -
-        # version tags rewritten to a malicious commit, executed by every
-        # workflow using @vX without a line of their own repo changing.
+        # Pinned by commit SHA, not by tag. A tag is a mutable pointer:
+        # CVE-2025-30066 (tj-actions/changed-files) was version tags rewritten to
+        # a malicious commit, executed by every workflow using @vX.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Terraform
@@ -117,13 +92,10 @@ jobs:
 
       - name: make tflint
         env:
-          # `tflint --init` telecharge le ruleset AWS depuis l'API GitHub. Sans
-          # jeton la requete est anonyme, et le quota anonyme de 60 requetes/heure
-          # est compte PAR ADRESSE IP, pas par depot : sur un runner heberge cette
-          # adresse est partagee avec le reste du monde et le quota est deja
-          # consomme. D'ou un `403 rate limit exceeded` qui met l'etape au rouge
-          # sans qu'une ligne de Terraform soit en cause. Le jeton du workflow
-          # (permissions: contents: read) suffit a passer sur le quota par depot.
+          # tflint --init downloads the AWS ruleset from the GitHub API. The
+          # anonymous quota of 60 requests/hour is counted per IP address, and a
+          # hosted runner shares its address: without a token the step fails on a
+          # 403 with no Terraform code at fault.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: make tflint
 
@@ -133,32 +105,20 @@ jobs:
   # ===========================================================================
   # STEPS 2, 3 and 4 - provision, inventory, configure
   #
-  # `needs: validate` is the condition the assignment asks for: this job does
-  # not start unless all three gates were green, so a red linter deploys
-  # nothing.
+  # needs: validate is the condition the assignment asks for. The guard is
+  # doubled on purpose: make apply also depends on make verify, so the rule
+  # holds from a laptop too. A safety property that only works inside CI is not
+  # a property of the code.
   #
-  # The guard is doubled on purpose. `make apply` also depends on `make verify`,
-  # so the same rule holds when the target is run from a laptop, where no
-  # GitHub job graph exists to enforce it. A safety property that only works
-  # inside CI is not a property of the code.
+  # Destruction, however, is NOT gated on validation. needs: alone skips the
+  # whole job when a gate is red, teardown included - a tflint broken by an API
+  # rate limit once left a running instance with no way to remove it from the
+  # pipeline. An escape hatch must never depend on what can break.
   #
-  # LA DESTRUCTION, ELLE, N'EST PAS CONDITIONNEE AUX VALIDATIONS.
-  #
-  # C'etait un vrai defaut : `needs:` seul fait sauter le job ENTIER quand une
-  # porte est rouge, etape de destruction comprise. Un `tflint` casse par une
-  # limite d'API - donc sans rapport avec l'infrastructure - a ainsi laisse une
-  # instance en marche sans aucun moyen de la supprimer depuis le pipeline.
-  #
-  # Conditionner la CREATION aux validations est la consigne. Y conditionner la
-  # DESTRUCTION transforme la moindre panne de linter en facture, et pousse a
-  # aller nettoyer a la main dans la console - exactement ce que l'IaC cherche a
-  # eviter. Une sortie de secours ne doit jamais dependre de ce qui peut casser.
-  #
-  # `!cancelled()` est indispensable : sans une fonction d'etat explicite, GitHub
-  # ajoute un `success()` implicite a la condition et saute le job malgre tout.
-  # L'egalite `needs.validate.result == 'success'` reprend alors le role de garde
-  # pour tout ce qui cree, et `make apply` reste par ailleurs saute en mode
-  # `detruire` : rien ne peut etre provisionne par cette porte.
+  # !cancelled() is required: without an explicit status function GitHub adds an
+  # implicit success() and skips the job anyway. The equality then carries the
+  # gate for anything that creates, and make apply stays skipped in detruire
+  # mode - nothing can be provisioned through this door.
   # ===========================================================================
   deploy:
     name: "2-4. EC2, inventory, Ansible"
@@ -192,17 +152,13 @@ jobs:
           version: v0.72.0
 
       - name: Install Ansible
-        # ansible-core alone lacks the collections requirements.yml declares. A control
-        # node installed from apt gets the bundle; a runner does not.
-        run: |
-          pip install --quiet ansible-core
-          ansible-galaxy collection install -r ansible/requirements.yml
+        # ansible-core is enough: the playbook uses only ansible.builtin modules.
+        run: pip install --quiet ansible-core
 
       - name: Configure AWS credentials
-        # Long-lived access keys, and that is a compromise rather than a choice:
-        # OIDC needs an IAM role trusting token.actions.githubusercontent.com,
-        # and this training account grants no IAM permissions at all. Ask for a
-        # role and delete these two secrets the day you get one.
+        # Long-lived access keys, a compromise rather than a choice: OIDC needs
+        # an IAM role trusting token.actions.githubusercontent.com, and this
+        # training account grants no IAM permissions at all.
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -210,14 +166,9 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Prepare the SSH key
-        # Runs BEFORE Terraform, not after. aws_key_pair reads a public key FILE
-        # at plan time, so the file must exist before the apply. Getting that
-        # order wrong fails on a runner while working perfectly on a laptop that
-        # happens to already have the key - a bug that only shows off the golden
-        # path.
-        #
-        # The public half is DERIVED from the private one rather than stored as a
-        # second secret: one source of truth, and no way for the two to drift.
+        # Before Terraform, not after: aws_key_pair reads a public key file at
+        # plan time. The public half is derived from the private one rather than
+        # stored as a second secret, so the two cannot drift.
         run: |
           umask 077
           mkdir -p ~/.ssh
@@ -239,23 +190,19 @@ jobs:
 
       # ---- STEP 2 -------------------------------------------------------
       - name: make apply
-        # Re-runs make verify as a prerequisite before touching AWS - d'ou le
-        # meme besoin de jeton que dans le job de validation.
+        # Re-runs make verify before touching AWS, hence the same token need.
         if: inputs.action != 'detruire'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: make apply
 
-      # ---- SSH access for this run only ---------------------------------
       - name: Open SSH for this runner only
         id: jit
         if: inputs.action != 'detruire'
-        # Hosted runners draw from huge dynamic ranges, so the security group
-        # cannot allowlist them in advance, and opening 22 to the world would
-        # throw away the point of the exercise. Instead: authorise this one
-        # address, for this one run, and revoke it in an always() step. The rule
-        # is deliberately NOT managed by Terraform - it must not survive in the
-        # state.
+        # Hosted runners draw from huge dynamic ranges, so they cannot be
+        # allowlisted in advance, and opening 22 to the world would throw away
+        # the point of the exercise. This rule is deliberately not managed by
+        # Terraform: it must not survive in the state.
         run: |
           runner_ip="$(curl -fsS https://checkip.amazonaws.com)"
           echo "cidr=${runner_ip}/32" >>"$GITHUB_OUTPUT"
@@ -281,9 +228,8 @@ jobs:
 
       - name: Lien et etat
         if: inputs.action != 'detruire'
-        # Deux affichages, pas un. Le resume de job est riche mais il faut ouvrir
-        # le run pour le voir ; une annotation ::notice:: apparait directement en
-        # tete de la page du run et dans la liste des executions.
+        # Two displays: the job summary is richer but needs the run to be opened,
+        # while a ::notice:: appears at the top of the run page and in the list.
         run: |
           ip='${{ steps.inventory.outputs.ip }}'
           url="http://$ip:8080/"
@@ -321,9 +267,8 @@ jobs:
 
       # ---- Teardown -----------------------------------------------------
       - name: Revoke the temporary SSH rule
-        # always(): a failed apply or a failed playbook must not leave the port
-        # open. Without this the just-in-time approach would be worse than
-        # useless, accumulating one rule per run.
+        # always(): a failed apply or playbook must not leave the port open, or
+        # the just-in-time approach accumulates one rule per run.
         if: always() && steps.jit.outputs.cidr != ''
         run: |
           aws ec2 revoke-security-group-ingress --group-id "${{ steps.jit.outputs.sg }}" \
@@ -332,9 +277,8 @@ jobs:
           echo "révoqué ${{ steps.jit.outputs.cidr }}"
 
       - name: Destruction
-        # always() pour que le mode "deploy-puis-detruire" nettoie meme si le
-        # playbook a echoue : sinon un echec laisserait une instance a facturer,
-        # ce qui est exactement le contraire du but.
+        # always() so deploy-puis-detruire cleans up even when the playbook
+        # failed: otherwise a failure leaves an instance billing.
         if: always() && inputs.action != 'deploy'
         run: |
           make destroy-auto
