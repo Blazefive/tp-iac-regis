@@ -30,6 +30,17 @@ on:
           - deploy-puis-detruire
           # Detruit une instance laissee en vie par une execution precedente.
           - detruire
+      acces:
+        description: "Qui peut atteindre l'application"
+        type: choice
+        default: prive
+        options:
+          # Le port applicatif n'accepte que l'adresse d'administration. Defaut
+          # sur : ouvrir au monde doit s'ecrire, jamais s'obtenir par oubli.
+          - prive
+          # Le port applicatif est ouvert a 0.0.0.0/0. SSH reste restreint dans
+          # les deux cas - c'est l'application qu'on partage, pas la machine.
+          - public
   pull_request:
     paths: ["envs/**", "ansible/**", "Makefile", ".github/workflows/**"]
 
@@ -52,6 +63,9 @@ env:
   # so the key material has a single source.
   TF_VAR_admin_cidr: ${{ vars.ADMIN_CIDR }}
   TF_VAR_vpc_id: ${{ vars.VPC_ID }}
+  # Vide en mode prive : la variable Terraform retombe alors sur son defaut
+  # `null`, et coalesce() restreint le port applicatif a admin_cidr.
+  TF_VAR_game_cidr: ${{ inputs.acces == 'public' && '0.0.0.0/0' || '' }}
 
 jobs:
   # ===========================================================================
@@ -231,8 +245,14 @@ jobs:
           ip='${{ steps.inventory.outputs.ip }}'
           url="http://$ip:8080/"
 
+          if [ '${{ inputs.acces }}' = 'public' ]; then
+            acces='**public** — le lien est partageable'
+          else
+            acces='**prive** — joignable depuis la seule adresse d'"'"'administration. Relancer avec `acces: public` pour partager.'
+          fi
+
           if [ '${{ inputs.action }}' = 'deploy' ]; then
-            echo "::notice title=Application en ligne::$url"
+            echo "::notice title=Application en ligne::$url (acces ${{ inputs.acces }})"
             etat='**en vie** — elle facture jusqu'"'"'a destruction'
             suite='Relancer ce workflow avec l'"'"'action **detruire** quand vous avez fini.'
           else
@@ -249,6 +269,7 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| Adresse IP | \`$ip\` |"
+            echo "| Acces | $acces |"
             echo "| SSH | \`ssh ubuntu@$ip\` — depuis l'adresse d'administration |"
             echo "| Instance | $etat |"
             echo ""
