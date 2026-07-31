@@ -9,95 +9,66 @@ MAKEFLAGS += --warn-undefined-variables --no-print-directory
 # NOT exported when AWS_ACCESS_KEY_ID is already in the environment. A CI runner
 # authenticates with key variables and has no ~/.aws/credentials, so exporting
 # AWS_PROFILE there makes the provider look for a profile that does not exist
-# and fail with "failed to get shared config profile, tp2" - before creating
-# anything, but also before doing anything useful.
+# and fail with "failed to get shared config profile, tp2".
 ifndef AWS_ACCESS_KEY_ID
 AWS_PROFILE ?= tp2
 export AWS_PROFILE
 endif
 
-ROOT        := envs/dev-aws
-TF          := terraform -chdir=$(ROOT)
-PLAN        := dev.tfplan
-BACKEND     := $(ROOT)/backend.hcl
-STATE_KEY   := dev-aws/terraform.tfstate
-REGION      ?= eu-west-3
-PROJECT     ?= tp-iac-regis
+ROOT      := envs/dev-aws
+TF        := terraform -chdir=$(ROOT)
+PLAN      := dev.tfplan
+BACKEND   := $(ROOT)/backend.hcl
+REGION    ?= eu-west-3
+PROJECT   ?= tp-iac-regis
 
 ANSIBLE_DIR := ansible
 INVENTORY   := $(ANSIBLE_DIR)/inventory.generated.ini
 PLAYBOOK    ?= yoxii.yml
 
 # One variable drives BOTH the reachability probe and ansible-playbook. It was
-# hardcoded at first, and the local run failed on step 4 while CI would have
-# passed - the worst kind of bug, one that only appears off the golden path.
+# hardcoded at first and the local run failed on step 4 while CI would have
+# passed - a bug that only appears off the golden path.
 #   CI    : the secret is written to this default path.
 #   local : make configure SSH_KEY=~/.ssh/tp2_ed25519
-SSH_KEY     ?= $(HOME)/.ssh/id_ed25519
+SSH_KEY ?= $(HOME)/.ssh/id_ed25519
 
-# Read from backend.hcl rather than hardcoded: the bucket name embeds the AWS
-# account id and this repository is public.
-BUCKET := $(shell awk -F'"' '/bucket/ {print $$2}' $(BACKEND) 2>/dev/null)
-
-.PHONY: help lint secrets clean ip check-backend bootstrap init \
-        fmt fmt-fix tflint trivy validate verify \
-        plan apply inventory configure deploy \
-        drift state destroy teardown leftovers
+.PHONY: help ip check-backend bootstrap init \
+        fmt tflint trivy verify apply inventory configure \
+        destroy destroy-auto teardown leftovers
 
 help: ## list available targets
 	@grep -E "^[a-zA-Z_-]+:.*## " $(MAKEFILE_LIST) | sed "s/:.*## /\t/"
 
-# ---- Repository hygiene (lab 1) ---------------------------------------------
-
-lint: ## run every pre-commit hook over the whole repository
-	pre-commit run --all-files
-
-secrets: ## scan the full history for secrets (gitleaks)
-	gitleaks detect --source . --verbose
-
-clean: ## remove local artefacts, without failing if absent
-	rm -rf .terraform envs/*/.terraform envs/*/*.tfplan $(INVENTORY) out
-
 # =============================================================================
 # STEP 1 - Infrastructure code validation
 #
-# Three gates, in this order, each failing the build on a non-zero exit:
-#   fmt     formatting
-#   tflint  correctness and quality
-#   trivy   security misconfiguration
-#
-# `verify` chains them. Because .SHELLFLAGS carries -e and make stops on the
-# first failing prerequisite, a red gate means nothing downstream runs - which
-# is exactly the condition the assignment asks for.
+# Three gates, in this order, each failing the build on a non-zero exit.
+# `verify` chains them; make stops on the first failing prerequisite.
 # =============================================================================
 
 fmt: ## STEP 1a - check Terraform formatting (does not rewrite)
 	terraform fmt -recursive -check -diff
-
-fmt-fix: ## rewrite Terraform in canonical format
-	terraform fmt -recursive
 
 tflint: ## STEP 1b - lint the Terraform for errors and bad practice
 	@cd $(ROOT) && tflint --init >/dev/null && tflint --format compact
 
 # .terraform and *.tfplan are excluded on purpose. With a plan file present trivy
 # scans the PLAN SNAPSHOT instead of the HCL, and inline `#trivy:ignore:`
-# comments - which live in the HCL - stop applying. The scan then re-reports
-# exceptions that were already justified in the code, and the gate goes red for
-# no reason.
+# comments - which live in the HCL - stop applying, so the gate goes red on
+# exceptions that were already justified in the code.
 trivy: ## STEP 1c - scan the Terraform for security misconfiguration
 	trivy config --quiet --exit-code 1 --severity MEDIUM,HIGH,CRITICAL \
 	  --skip-dirs '**/.terraform' --skip-files '**/*.tfplan' $(ROOT)
-
-validate: ## check Terraform syntax and internal consistency
-	$(TF) init -backend=false -input=false >/dev/null
-	$(TF) validate
 
 verify: fmt tflint trivy ## STEP 1 - all validation gates, in order
 	@printf '\n\033[32mValidations OK : fmt, tflint, trivy.\033[0m\n'
 
 # =============================================================================
 # STEP 2 - Provisioning, only once STEP 1 is green
+#
+# `apply` depends on `verify`, so the condition holds when the target is run
+# from a laptop too, where no GitHub job graph exists to enforce it.
 # =============================================================================
 
 ip: ## print your public IP as a /32, for admin_cidr
@@ -127,9 +98,6 @@ bootstrap: ## create the S3 state bucket: versioning, public access blocked, enc
 
 init: check-backend ## initialise the root module on the S3 backend
 	$(TF) init -backend-config=backend.hcl -input=false
-
-plan: ## compute and save the plan -- CHANGES NOTHING
-	$(TF) plan -out=$(PLAN) -input=false
 
 apply: verify ## STEP 2 - create the instance, only if STEP 1 passed
 	$(TF) plan -out=$(PLAN) -input=false
@@ -178,26 +146,9 @@ configure: ## STEP 4 - apply the playbook to the freshly created instance
 	done; \
 	cd $(ANSIBLE_DIR) && ansible-playbook -i ../$(INVENTORY) --private-key "$(SSH_KEY)" $(PLAYBOOK)
 
-deploy: apply inventory configure ## STEPS 1 to 4, end to end
-	@printf '\n\033[32mPipeline complet : validations, EC2, inventaire, configuration.\033[0m\n'
-	@$(TF) output
-
-# ---- Operations --------------------------------------------------------------
-
-drift: ## inject drift: open SSH to 0.0.0.0/0 outside Terraform
-	aws ec2 authorize-security-group-ingress \
-	  --group-id "$$($(TF) output -raw security_group_id)" \
-	  --protocol tcp --port 22 --cidr 0.0.0.0/0
-	@printf '\ndrift in place. Next: make plan\n'
-
-state: check-backend ## list the state, then the sensitive data it holds
-	$(TF) state list
-	@printf '\n-- what the tfstate reveals --\n'
-	@aws s3 cp s3://$(BUCKET)/$(STATE_KEY) - \
-	  | jq -r '.resources[] | select(.type=="aws_instance") | .instances[0].attributes
-	      | "user_data : \(.user_data[0:50])...",
-	        "private ip: \(.private_ip)",
-	        "public ip : \(.public_ip)"'
+# =============================================================================
+# Teardown
+# =============================================================================
 
 destroy: ## destroy everything this root module manages
 	$(TF) destroy
@@ -207,15 +158,16 @@ destroy-auto: ## same, without the confirmation prompt (for CI)
 
 teardown: check-backend ## delete the state bucket -- AFTER destroy, never before
 	@set -eu; \
+	bucket="$$(awk -F'"' '/bucket/ {print $$2}' $(BACKEND))"; \
 	for key in Versions DeleteMarkers; do \
-	  payload="$$(aws s3api list-object-versions --bucket $(BUCKET) --output json \
+	  payload="$$(aws s3api list-object-versions --bucket "$$bucket" --output json \
 	    --query "{Objects:($$key[]||\`[]\`)[].{Key:Key,VersionId:VersionId}}")"; \
 	  case "$$payload" in *'"Objects": []'*|*'"Objects":[]'*) continue;; esac; \
-	  aws s3api delete-objects --bucket $(BUCKET) --delete "$$payload" >/dev/null; \
+	  aws s3api delete-objects --bucket "$$bucket" --delete "$$payload" >/dev/null; \
 	done; \
-	aws s3api delete-bucket --bucket $(BUCKET) --region $(REGION); \
+	aws s3api delete-bucket --bucket "$$bucket" --region $(REGION); \
 	rm -f $(BACKEND); \
-	printf '%s deleted\n' "$(BUCKET)"
+	printf '%s deleted\n' "$$bucket"
 
 # The training AWS account is SHARED: every lookup filters on the Project tag,
 # so it can never point at - let alone delete - a classmate's resource.
@@ -227,9 +179,6 @@ leftovers: ## find MY forgotten billable resources
 	@printf -- '-- unattached volumes --\n'
 	@aws ec2 describe-volumes --filters "Name=tag:Project,Values=$(PROJECT)" \
 	  "Name=status,Values=available" --query 'Volumes[].VolumeId' --output text
-	@printf -- '-- unassociated elastic IPs --\n'
-	@aws ec2 describe-addresses --filters "Name=tag:Project,Values=$(PROJECT)" \
-	  --query 'Addresses[?AssociationId==null].PublicIp' --output text
 	@printf -- '-- VPCs --\n'
 	@aws ec2 describe-vpcs --filters "Name=tag:Project,Values=$(PROJECT)" \
 	  --query 'Vpcs[].VpcId' --output text

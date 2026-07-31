@@ -17,11 +17,6 @@ name: pipeline
 on:
   workflow_dispatch:
     inputs:
-      playbook:
-        description: "Playbook applied in step 4"
-        type: choice
-        default: yoxii.yml
-        options: [yoxii.yml, playbook.yml]
       destroy_after:
         description: "Destroy the instance at the end (cost control)"
         type: boolean
@@ -134,9 +129,8 @@ jobs:
           version: v0.72.0
 
       - name: Install Ansible
-        # ansible-core alone lacks community.mysql and ansible.posix, which the
-        # playbooks use. A control node installed from apt gets the bundle; a
-        # runner does not.
+        # ansible-core alone lacks the collections requirements.yml declares. A control
+        # node installed from apt gets the bundle; a runner does not.
         run: |
           pip install --quiet ansible-core
           ansible-galaxy collection install -r ansible/requirements.yml
@@ -213,7 +207,7 @@ jobs:
 
       # ---- STEP 4 -------------------------------------------------------
       - name: make configure
-        run: make configure PLAYBOOK=${{ inputs.playbook }}
+        run: make configure
 
       - name: Report
         run: |
@@ -222,7 +216,6 @@ jobs:
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Playbook | \`${{ inputs.playbook }}\` |"
             echo "| Adresse | \`${{ steps.inventory.outputs.ip }}\` |"
             echo "| URL | http://${{ steps.inventory.outputs.ip }}:8080/ |"
             echo ""
