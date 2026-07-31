@@ -3,9 +3,18 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 MAKEFLAGS += --warn-undefined-variables --no-print-directory
 
-# Dedicated AWS profile, so the machine default profile is left alone.
+# A dedicated AWS profile on a workstation, so the machine default profile is
+# left alone.
+#
+# NOT exported when AWS_ACCESS_KEY_ID is already in the environment. A CI runner
+# authenticates with key variables and has no ~/.aws/credentials, so exporting
+# AWS_PROFILE there makes the provider look for a profile that does not exist
+# and fail with "failed to get shared config profile, tp2" - before creating
+# anything, but also before doing anything useful.
+ifndef AWS_ACCESS_KEY_ID
 AWS_PROFILE ?= tp2
 export AWS_PROFILE
+endif
 
 ROOT        := envs/dev-aws
 TF          := terraform -chdir=$(ROOT)
