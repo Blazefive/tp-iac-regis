@@ -20,8 +20,8 @@ puis `run --all-files` : tout passe. Cible `secrets` = `gitleaks detect --source
 hook). `make secrets` → gitleaks retrouve la clé dans l'historique. Purge :
 `git filter-repo --path config/app.env --invert-paths`, après quoi
 `git log --all --full-history -- config/app.env` ne renvoie plus rien.
-> Nuance observée : la clé d'exemple officielle d'AWS (`AKIAIOSFODNN7EXAMPLE`) est allowlistée par
-> gitleaks ; il faut une fausse clé non canonique pour voir la détection se déclencher.
+> Nuance observée : la clé d'exemple officielle publiée par AWS dans sa documentation est allowlistée
+> par gitleaks ; il faut une fausse clé non canonique pour voir la détection se déclencher.
 
 **D. Signature + protection.** Signature SSH (`gpg.format ssh`, `commit.gpgsign true`).
 `git verify-commit HEAD` → `Good "git" signature`. Protection de `main` : push direct interdit, une
