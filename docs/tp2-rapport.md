@@ -1,255 +1,244 @@
-# TP2 — Déploiement sécurisé sur AWS, état distant et détection de dérive
+# Devoir final — Pipeline CI/CD : validation, provisionnement, configuration
 
-**Module 3 — IaC & Terraform** · Blazefive · 30/07/2026
-Terraform v1.15.8, provider `hashicorp/aws` v6.57.1, région `eu-west-3`, WSL2 Ubuntu 24.04.
-Dépôt : <https://github.com/Blazefive/tp-iac-regis> — reprise du socle du TP1.
+**Module 3 — IaC & Terraform** · Blazefive · 31/07/2026
+Terraform 1.15.8 · AWS provider 6.57.1 · ansible-core · tflint 0.64.0 · trivy 0.72.0 · région `eu-west-3`
+Dépôt : <https://github.com/Blazefive/tp-iac-regis> — pipeline : `.github/workflows/pipeline.yml`
 
-## Périmètre
+## Résultat
 
-Mené en **plan-only**, **AWS seul**. Ce qui a réellement tourné :
+La chaîne complète s'exécute sur GitHub Actions sans aucune intervention entre les étapes.
 
-| | Statut |
-|---|---|
-| A — code du backend S3 + script de création du bucket | écrits, **non exécutés** |
-| A — `init`, verrou de provider | **exécuté** — `.terraform.lock.hcl` versionné (aws v6.57.1, signé HashiCorp) |
-| B — code, `fmt`, `validate`, `plan -out` | **exécuté** — `Plan: 8 to add, 0 to change, 0 to destroy` |
-| B — `apply`, vérification HTTP | **non exécuté** |
-| C — Azure | **non traitée** : aucune souscription, `az` absent du poste |
-| D — dérive réelle, inspection du `tfstate`, `destroy` | **non exécutés** — procédure ci-dessous |
+**Run `30618245903`** — toutes les étapes en `success` :
 
-Aucune ressource n'a été créée : CloudTrail ne montre aucun événement d'écriture pour l'utilisateur
-`regis`. Le `plan` n'a émis que des appels de lecture (`DescribeImages`, `GetCallerIdentity`) — ce qui
-ne veut pas dire que `plan` est inoffensif, voir « À retenir ».
+| Étape | Commande | Ce qu'elle fait |
+|---|---|---|
+| **1** | `make fmt`, `make tflint`, `make trivy` | valide le code d'infrastructure |
+| **2** | `make init`, `make apply` | crée l'EC2, **uniquement si l'étape 1 est verte** |
+| **3** | `make inventory` | lit `terraform output -raw instance_public_ip` et écrit l'inventaire Ansible |
+| **4** | `make configure` | joue `ansible-playbook` sur cette adresse |
 
-> **Le compte AWS de la formation est partagé par toute la promotion.** `list-buckets` renvoie neuf
-> buckets d'état qui ne sont pas les miens — huit portent un prénom d'étudiant — plus la paire de clés
-> du formateur. J'ai relevé le fait ; je n'ai lu aucun de ces états. C'est le point de sécurité le
-> plus intéressant du TP, voir Partie A.
+Puis nettoyage : règle SSH temporaire révoquée, instance détruite, règles de pare-feu restantes affichées.
 
-## Partie A — Socle et état distant
+**Run `30617905792`** — la démonstration inverse, et elle vaut autant. `make init` échoue ; `make apply`,
+`make inventory` et `make configure` sont tous **`skipped`**. Aucune ressource créée. La condition de
+l'étape 2 a donc été observée dans les deux sens, pas seulement décrite.
+
+## Déclencheur retenu
+
+`workflow_dispatch` pour la chaîne complète, `pull_request` pour la seule étape 1.
+
+Le dépôt est **public**. Un déclencheur automatique sur `push` exposerait le pipeline à toute pull
+request, et `terraform plan` **n'est pas une opération en lecture seule** — provisioners `local-exec`,
+data sources `external` et `http`, provider malveillant s'exécutent tous sur le runner. C'est le risque
+CICD-SEC-04 de l'OWASP, et Pen Test Partners a montré qu'un jeton n'ayant que la permission « plan »
+suffit à extraire les identifiants AWS d'un runner.
+
+Le job de validation tourne donc sur chaque pull request, **sans aucun identifiant**, et le job de
+déploiement est réservé au déclenchement manuel.
+
+## Étape 1 — Validation du code d'infrastructure
+
+Trois portes, dans l'ordre, chacune échouant sur un code de retour non nul.
+
+### Ce que les scans ont réellement trouvé
+
+**`tflint`** — `variable "vpc_cidr" is declared but not used`. Séquelle du passage du VPC en data
+source : la variable n'avait plus de lecteur. Supprimée. C'est précisément l'intérêt d'un linter face à
+un simple `terraform validate`, qui l'aurait acceptée sans rien dire.
+
+**`trivy`** — deux constats :
+
+- **AWS-0104 (CRITICAL)** — égress totalement ouvert. **Corrigé** : au lieu de `protocol = "-1"` sur
+  tous les ports, l'instance ne sort plus que sur 443, 80, 53/udp, 53/tcp et 123/udp. Une machine qui
+  ne joint que ses dépôts, le DNS et l'heure est un mauvais point d'appui : plus de port sortant
+  arbitraire pour un reverse shell, plus d'exfiltration sur un port haut au hasard.
+- **AWS-0164 (HIGH)** — le sous-réseau attribue une IP publique. Inhérent : la machine sert une
+  application publique.
+
+### Les exceptions sont dans le code, pas dans un fichier à part
+
+Ce qui reste est assumé par des commentaires `#trivy:ignore:` **avec justification et date
+d'expiration**, placés au-dessus de la ressource concernée :
 
 ```hcl
-# Configuration PARTIELLE : un bloc backend n'accepte ni variable ni
-# interpolation, le nom du bucket est donc fourni à l'initialisation.
-backend "s3" {
-  key          = "dev-aws/terraform.tfstate"
-  region       = "eu-west-3"   # doit être un littéral
-  encrypt      = true          # chiffrement imposé à l'écriture
-  use_lockfile = true          # verrouillage natif S3 — vaut false PAR DÉFAUT
-}
-```
-```bash
-terraform init -backend-config=backend.hcl    # bucket = "<projet>-tfstate-<compte>"
+#trivy:ignore:AWS-0104:exp:2026-12-31
+resource "aws_security_group" "web" {
 ```
 
-`use_lockfile` remplace la table DynamoDB des tutoriels antérieurs à 2025 (introduit en 1.10.0, GA en
-1.11.0, DynamoDB déprécié). **Il vaut `false` par défaut** : sans cette ligne, aucun verrou, et deux
-`apply` simultanés corrompent l'état. Rien ne le signale.
+Les ports sont déjà resserrés ; ce qui subsiste est la **destination**, et aucun miroir Ubuntu ne
+publie de plage d'adresses stable. Fermer proprement demanderait un mandataire sortant ou des points
+de terminaison VPC — la bonne réponse en production, hors périmètre ici. L'échéance est délibérée :
+une dérogation sans date est un trou permanent que personne ne relit.
 
-La configuration partielle n'est pas un raffinement : c'est le **seul** mécanisme disponible pour
-sortir le nom du bucket du code, puisqu'un bloc `backend` est évalué avant les variables. Effet de
-bord utile ici — l'identifiant du compte AWS, que le nom du bucket contient, reste hors du dépôt
-public. `backend.hcl` est ignoré par Git, `backend.hcl.example` documente le format, et
-`make bootstrap` écrit le fichier réel.
+### Un piège de trivy qui aurait rendu la porte rouge sans raison
 
-Le bucket est créé **hors Terraform** (`make bootstrap`) : une racine ne peut pas gérer le backend
-dont elle se sert. Trois réglages, exactement ceux de la consigne — versioning, Block Public Access
-(4 interrupteurs), chiffrement par défaut SSE-S3 + Bucket Key.
+Trivy annonçait le type `terraformplan-snapshot` : il avait détecté un `dev.tfplan` laissé par un essai
+et scannait cet instantané **au lieu du HCL**. Dans ce mode, les commentaires `#trivy:ignore:` — qui
+vivent dans le HCL — ne s'appliquent plus, et les exceptions déjà justifiées ressortaient comme des
+échecs. La cible `make trivy` exclut donc `.terraform` et `*.tfplan`, et le commentaire l'explique sur
+place.
 
-SSE-S3 et non SSE-KMS avec clé gérée par le client : une CMK coûte ~1 USD/mois et sa suppression
-impose un délai de 7 à 30 jours, incompatible avec un TP. C'est le seul écart assumé au cours.
+## Étape 2 — Provisionnement conditionnel
 
-`init` vérifié : `.terraform.lock.hcl` créé et **versionné** ; `.terraform/`, `terraform.tfvars` et
-`*.tfplan` ignorés (`git check-ignore` sur chacun). J'ai ajouté `*.tfplan` au `.gitignore` du TP1 :
-le plan binaire contient toutes les valeurs planifiées, HashiCorp le met au même niveau de
-sensibilité que l'état.
+**La condition est posée deux fois, volontairement.**
 
-**La faille structurelle de ce compte.** Mon utilisateur IAM `regis` — clé d'accès longue durée, pas
-de SSO — peut lister les buckets de tout le compte, donc voir les états de mes camarades. Chaque
-bucket est bien durci *individuellement*, mais durcir un bucket ne protège pas contre un principal
-légitime du compte. Le contrôle manquant est **IAM**, pas S3 : il faudrait une politique restreignant
-`s3:*` sur `tp-iac-<etudiant>-tfstate-*` au seul principal correspondant, ou un compte par étudiant.
-C'est l'exigence « accès réservé aux rôles de déploiement » du cours — la seule des cinq qu'un bucket
-parfaitement configuré ne peut pas satisfaire seul.
-
-## Partie B — Déploiement AWS
-
-Huit ressources, une seule racine, aucun module : `aws_vpc` → `aws_internet_gateway` →
-`aws_subnet` → `aws_route_table` + association → `aws_security_group` → `aws_key_pair` →
-`aws_instance`.
-
-```
-Plan: 8 to add, 0 to change, 0 to destroy.
+```yaml
+deploy:
+  needs: validate            # le job ne démarre pas si une porte est rouge
 ```
 
-Durcissement relu dans le JSON du plan, valeurs effectives :
-
-| Contrôle | Valeur | Pourquoi |
-|---|---|---|
-| `http_tokens` | `required` | IMDSv2 imposé — **aucune valeur par défaut sûre** dans le provider |
-| `http_put_response_hop_limit` | `1` | bloque le relais via reverse proxy ou conteneur mal isolé |
-| `root_block_device.encrypted` | `true` | chiffrement au repos explicite |
-| SSH 22/tcp | `<mon-IP>/32` | jamais `0.0.0.0/0` — deux blocs `validation` l'interdisent |
-| HTTP 80/tcp | `0.0.0.0/0` | le service est public, c'est l'objectif |
-| `user_data_replace_on_change` | `true` | voir ci-dessous |
-
-Toute la configuration est paramétrable et documentée dans `terraform.tfvars.example` — sauf trois
-lignes, laissées **en dur volontairement** : le chiffrement du volume racine, `http_tokens` et la
-limite de sauts. Exposer un contrôle de sécurité en variable le rend optionnel ; or la thèse du cours
-est précisément que la cause racine des mauvaises configurations n'est pas l'erreur d'écriture, mais
-le fait que les arguments de sécurité soient optionnels et leurs défauts non sûrs. Les rendre
-configurables aurait reproduit le défaut qu'on cherche à corriger.
-
-AMI résolue : `ami-0c1002cdaa7a0954f`
-(`ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260714`, Canonical). `t2.micro` plutôt
-que `t3.micro` : c'est le seul type couvert par les 750 h/mois du palier gratuit historique.
-
-Trois décisions non triviales, qui sont l'essentiel de ce que j'ai appris :
-
-**1. Règles de pare-feu en blocs `ingress` *en ligne*, pas en ressources séparées.** Avec
-`aws_vpc_security_group_ingress_rule`, une règle ajoutée à la main est un objet **non géré** :
-Terraform ne la voit pas et ne signale **aucune** dérive. Les blocs en ligne donnent à Terraform
-l'ensemble complet des règles, donc la détection. La partie D est infaisable avec l'écriture
-« moderne » — ici le choix de style détermine la capacité de détection, ce n'est pas cosmétique.
-
-**2. `user_data_replace_on_change = true`.** Sans cette ligne, modifier `user_data` ne change *rien*
-sur une instance qui tourne : le script ne s'exécute qu'au premier démarrage. Terraform afficherait
-un plan vert pendant que la machine reste sur l'ancienne configuration — une dérive invisible,
-introduite par Terraform lui-même. À `true`, l'instance est remplacée : modèle immuable.
-
-**3. Un bloc `check`.** Assertion rejouée à chaque `plan` et `apply` après rafraîchissement : le port
-22 ne doit jamais être joignable depuis `0.0.0.0/0`. Sur le plan initial elle ne produit **aucun
-avertissement** — les valeurs ne sont pas encore connues, Terraform la saute silencieusement. Son
-intérêt est post-`apply` : un détecteur de dérive permanent, qui avertit sans bloquer.
-
-## Partie D — Dérive : procédure et interprétation
-
-Non exécutée faute d'`apply`. La séquence est scriptée dans le `Makefile` :
-
-```bash
-make drift   # authorize-security-group-ingress --port 22 --cidr 0.0.0.0/0
-make plan    # détection
-make apply   # réconciliation
-make state   # inspection du tfstate
+```make
+apply: verify                # make apply rejoue fmt, tflint et trivy avant AWS
+verify: fmt tflint trivy
 ```
 
-`make drift` lit l'ID du groupe dans la sortie Terraform (`output -raw security_group_id`), pas dans
-la console : la source de vérité reste le projet.
+Le premier garde-fou vit dans le graphe de jobs GitHub, le second dans le Makefile. Sans le second, la
+règle ne vaudrait que dans la CI : un `make apply` lancé depuis un poste de travail contournerait la
+validation. **Une propriété de sûreté qui n'existe que dans un environnement n'est pas une propriété
+du code.**
 
-Ce que le `plan` montrera, et son interprétation :
+Vérifié en cassant volontairement le formatage : `make apply` s'arrête sur `fmt`, sort en code 2,
+Terraform n'est jamais appelé.
 
-1. `~ update in-place` sur `aws_security_group.web`, le jeu `ingress` passant de deux à trois règles,
-   la troisième étant `22/tcp depuis 0.0.0.0/0`. Le rafraîchissement a constaté que la réalité ne
-   correspondait plus à l'état ; Terraform propose de la ramener vers la configuration, qui reste la
-   source de vérité.
-2. Le bloc `check` passe en **Warning** : les valeurs sont désormais connues et l'assertion échoue.
-   C'est l'avertissement qui compte, plus que le diff — il nomme le problème de sécurité au lieu de
-   décrire un écart d'attributs.
-3. `apply` révoque la règle surnuméraire. **La modification manuelle est silencieusement écrasée** —
-   comportement voulu, et c'est aussi pourquoi une correction d'urgence faite en console est perdue au
-   déploiement suivant si elle n'est pas reportée dans le code.
-4. Aucune trace de *qui* a ouvert le port : CloudTrail le sait, Terraform non. La dérive est détectée
-   et corrigée, elle n'est pas attribuée.
+## Étape 3 — Adresse IP et inventaire
 
-## Les trois informations sensibles de l'état — et le contrôle qui le protège
+```make
+ip="$(terraform -chdir=envs/dev-aws output -raw instance_public_ip)"
+```
 
-Pas d'`apply`, donc pas de `tfstate`. Les trois éléments ci-dessous sont **vérifiés dans le fichier
-de plan réellement produit** (`dev.tfplan`, 13 458 octets), qui contient les mêmes valeurs et se
-protège de la même façon.
+La sortie `instance_public_ip` a été ajoutée pour ça : `public_url` renvoie une URL, pas une adresse
+exploitable par un inventaire. Le fichier produit :
 
-**1. Le script `user_data` en clair.** Lisible intégralement
-(`jq '.resource_changes[] | select(.address=="aws_instance.web") | .change.after.user_data'`). Ici
-une page nginx anodine ; en production ce script porte régulièrement jetons d'enrôlement,
-identifiants de dépôt privé et URL internes. Rien ne les distingue du reste.
+```ini
+[web]
+aws-web-01 ansible_host=<ip>
 
-**2. La topologie réseau et les règles de pare-feu exactes.** `10.20.0.0/16`, `10.20.1.0/24`,
-`eu-west-3a`, plus le jeu de règles complet — donc la surface d'attaque énumérée, sans avoir à scanner.
+[web:vars]
+ansible_user=ubuntu
+```
 
-**3. Mon adresse IP publique personnelle, `<mon-IP>/32`.** Conséquence directe de la bonne pratique
-« SSH restreint à votre IP » : la mesure de sécurité inscrit une **donnée personnelle** dans l'état,
-que le versioning du bucket conserve indéfiniment. Elle est masquée dans ce rapport pour la même
-raison — le dépôt est public.
+La cible apprend aussi la **clé d'hôte** de la machine avec `ssh-keyscan`, ce qui permet de garder
+`host_key_checking = True` dans `ansible.cfg`. La solution courante — désactiver la vérification —
+transforme chaque exécution en homme-du-milieu accepté d'avance.
 
-**Contrôles qui protègent ce fichier dans ma configuration :**
+L'inventaire est **ignoré par Git** : il est réécrit à chaque exécution depuis l'état réel.
 
-| Niveau | Contrôle |
+## Étape 4 — Configuration par Ansible
+
+`make configure` attend que SSH réponde, puis joue le playbook sur l'adresse de l'inventaire. Le
+playbook déployé installe nginx, un service de jeu multijoueur en Python derrière un mandataire
+WebSocket, et vérifie son propre travail : les fichiers sont servis, le code du serveur **n'est pas**
+accessible en HTTP, et deux clients ouverts simultanément atterrissent bien dans la même salle sur des
+couleurs opposées.
+
+## Sécurité du pipeline
+
+| Mesure | Pourquoi |
 |---|---|
-| Backend | `encrypt = true`, `use_lockfile = true`, clé dédiée par racine |
-| Bucket | versioning, Block Public Access ×4, chiffrement par défaut |
-| Dépôt | `.gitignore` : `*.tfstate*`, `*.tfplan`, `backend.hcl` ; `gitleaks` en pre-commit (TP1) |
-| **Manquant** | **politique IAM par étudiant** — voir Partie A, c'est le trou réel |
+| `pull_request`, **jamais** `pull_request_target` | la seconde forme exécute le code de la PR **avec** les secrets |
+| Job `deploy` réservé à `workflow_dispatch` | exige le droit d'écriture : aucun visiteur ne peut le lancer |
+| Actions épinglées par **empreinte de commit** | un tag est mutable — c'est ce qui a fait marcher CVE-2025-30066 sur `tj-actions/changed-files` |
+| `permissions: contents: read` | le `GITHUB_TOKEN` ne peut rien écrire |
+| Règle SSH **temporaire** pour la seule IP du runner | les runners ont des adresses dynamiques ; ouvrir 22 au monde annulerait tout l'exercice |
+| Révocation dans une étape `if: always()` | sans elle, une règle s'accumulerait à chaque exécution, y compris après un échec |
+| Clé publique **dérivée** de la privée | un seul secret, donc aucune dérive possible entre les deux moitiés |
+| Secrets hors du dépôt | `terraform.tfvars`, `backend.hcl` et l'inventaire sont ignorés ; `gitleaks` ne trouve rien sur tout l'historique |
 
-La parade structurelle, non nécessaire ici puisqu'aucune ressource ne produit de secret : les valeurs
-**éphémères** (1.10) et les attributs **en écriture seule** `*_wo` (1.11), qui empêchent le secret
-d'entrer dans l'état au lieu de tenter de l'y protéger.
+**La faiblesse assumée : l'OIDC est impossible.** La bonne pratique est un rôle IAM avec relation de
+confiance sur `token.actions.githubusercontent.com`, sans aucune clé stockée. L'utilisateur IAM de ce
+TP n'a **aucune permission IAM** — `iam:ListOpenIDConnectProviders` est refusé — donc ni fournisseur
+OIDC ni rôle ne peuvent être créés. Il reste des clés d'accès longue durée en secrets GitHub. Le
+correctif n'est pas technique : il faut demander un rôle, puis supprimer ces deux secrets.
 
-## Tableau comparatif AWS ↔ Azure
+**Un accès à connaître** : `borisrosedev` dispose du droit d'écriture sur le dépôt, donc peut
+déclencher le pipeline. C'est le seul chemin d'entrée en dehors du propriétaire.
 
-Colonne AWS : ce que j'ai écrit. Colonne Azure : l'équivalent qu'il aurait fallu écrire.
+## L'infrastructure déployée
 
-| Rôle | AWS (écrit) | Azure (équivalent) |
-|---|---|---|
-| Groupement logique | *implicite : le VPC* | `azurerm_resource_group` |
-| Réseau | `aws_vpc` — `10.20.0.0/16` | `azurerm_virtual_network` — `address_space` |
-| Sous-réseau | `aws_subnet` — **une seule zone** | `azurerm_subnet` — peut couvrir plusieurs zones |
-| Sortie Internet | `aws_internet_gateway` + `aws_route_table` + association | *implicite* — routage système |
-| Pare-feu | `aws_security_group` (`ingress`/`egress`) | `azurerm_network_security_group` (`security_rule` + `priority`) |
-| Rattachement du pare-feu | attribut `vpc_security_group_ids` | ressource dédiée `…_interface_security_group_association` |
-| Adresse publique | attribut `map_public_ip_on_launch` | ressource dédiée `azurerm_public_ip` |
-| Carte réseau | *implicite* | ressource dédiée `azurerm_network_interface` |
-| Machine | `aws_instance` — `t2.micro` | `azurerm_linux_virtual_machine` — `Standard_B2ats_v2` |
-| Image | `data.aws_ami` + filtre | bloc `source_image_reference` |
-| Clé SSH | `aws_key_pair` + `key_name` | `admin_ssh_key` + `disable_password_authentication` |
-| Amorçage | `user_data` (texte) | `custom_data` (**`base64encode()` obligatoire**) |
-| Disque chiffré | `root_block_device.encrypted = true` | chiffré par défaut au niveau plateforme |
-| Métadonnées durcies | `metadata_options.http_tokens = "required"` | **pas d'équivalent** — l'IMDS Azure exige déjà un en-tête `Metadata: true` |
-| État | bucket S3 + `use_lockfile` | Storage Account / conteneur blob + bail (*lease*) |
+Six ressources gérées : sous-réseau public, table de routage, association, groupe de sécurité, paire de
+clés, instance `t2.micro`.
 
-Trois différences de **modèle**, pas de nom : Azure exige un groupe de ressources et matérialise NIC
-et IP publique en ressources distinctes (plus verbeux, mais le cycle de vie de l'IP est découplé de
-celui de la VM) ; le sous-réseau AWS est mono-zone, donc la haute disponibilité s'écrit dans la
-topologie côté AWS et dans la ressource côté Azure ; le durcissement IMDS n'a pas d'équivalent Azure
-parce que le défaut y est déjà sûr. Traduire n'est jamais renommer.
+**Le VPC et sa passerelle Internet sont lus en data source, pas créés.** Le compte de la formation est
+partagé et `eu-west-3` est à son quota de 5 VPC, tous appartenant à d'autres étudiants ; toutes les
+autres régions sont refusées par un *deny* explicite dans la politique IAM du compte. Supprimer le VPC
+d'un camarade n'était pas une option. Conséquence assumée : `terraform destroy` ne peut pas les
+supprimer — ce qui est correct, ils ne nous appartiennent pas.
 
-## Question de fond — IMDSv2 et Capital One (mars 2019)
+Durcissement de l'instance : `http_tokens = "required"` (IMDSv2 imposé, sans valeur par défaut sûre
+dans le provider — Capital One, 2019), limite de sauts à 1, volume racine chiffré, SSH restreint à une
+seule `/32`, égress resserré à quatre ports.
 
-Cela aurait **arrêté la chaîne** : la primitive SSRF n'émettait que des `GET` sans en-tête
-personnalisé, elle n'aurait pas pu forger le `PUT` porteur de `X-aws-ec2-metadata-token-ttl-seconds`
-exigé pour obtenir un jeton — donc pas d'identifiants du rôle du WAF, donc pas de `s3 sync` — et le
-*hop limit* à 1 aurait bloqué tout relais.
-Cela n'aurait **rien changé** à trois choses : IMDSv2 n'existait pas (annoncé le 19 novembre 2019,
-huit mois *après* l'intrusion) ; le rôle du WAF restait sur-privilégié — `s3:ListAllMyBuckets` n'a
-aucune raison d'y figurer, et le moindre privilège était la seule défense disponible à l'époque,
-comme l'a retenu l'OCC en sanctionnant l'absence d'évaluation de risque avant migration (80 M$) ;
-et les quatre mois de présence non détectée relèvent de la journalisation, pas des métadonnées.
+L'AMI est **épinglée à un build exact** plutôt que résolue par `most_recent` sur un joker. Deux
+raisons, et la seconde n'est pas théorique : un joker résout une image différente au fil du temps et
+propose de remplacer l'instance sans qu'on ait rien demandé ; et ce compte tient une **liste blanche
+d'AMI par identifiant** — le build le plus récent a été refusé par `RunInstances` avec un *deny*
+explicite. Une AMI non épinglée ne démarre tout simplement pas ici.
 
-## Facturation et destruction
+## Trois défauts trouvés en exécutant, pas en relisant
 
-Pas de capture de la page de facturation : **rien n'a été appliqué**, donc rien à détruire. La preuve
-équivalente est `make leftovers`, vide — inventaire filtré sur l'étiquette `Project`.
+Aucun n'était visible sur la machine de développement. C'est l'enseignement principal de ce devoir.
 
-Deux remarques que la consigne n'anticipe pas. D'abord, sur un compte **partagé**, une capture de la
-page de facturation ne prouve rien de *ma* propreté : elle agrège la dépense de toute la promotion.
-Seul l'inventaire filtré par étiquette est une preuve individuelle — ce qui donne à l'étiquetage
-systématique une seconde justification, comptable après l'inventaire. Ensuite, la recherche non
-filtrée révèle une instance `t2.micro` **en cours d'exécution** et trois VPC hors VPC par défaut qui
-ne m'appartiennent pas : quelqu'un a oublié un `destroy`. Je n'y touche pas.
+**1. Chemin de clé SSH codé en dur.** La sonde de `make configure` pointait sur `~/.ssh/id_ed25519`,
+qui existe en CI mais nulle part ailleurs. Le pire type de défaut : la CI serait passée au vert en
+laissant croire que tout allait bien. Devenu la variable `SSH_KEY`, qui pilote à la fois la sonde et
+`ansible-playbook --private-key`.
+
+**2. Paquet absent d'une version d'Ubuntu.** Le playbook installait `python3-websockets`, présent sur
+Ubuntu 26.04 — la machine qui a servi à l'écrire — mais **absent d'Ubuntu 24.04**, celle de l'EC2.
+Remplacé par un environnement virtuel avec `websockets==15.0.1` **épinglé** : portable sur les deux, et
+reproductible dans six mois. C'est la leçon de l'AMI appliquée aux dépendances Python.
+
+**3. `AWS_PROFILE` exporté en dur.** Le Makefile exportait `AWS_PROFILE=tp2`. Correct sur un poste de
+travail ; sur un runner, les identifiants arrivent par variables d'environnement et aucun
+`~/.aws/credentials` n'existe, donc le provider cherchait un profil absent :
+`failed to get shared config profile, tp2`. L'export est désormais conditionné à l'absence de
+`AWS_ACCESS_KEY_ID`. C'est ce défaut qui a fait échouer le premier run réel — sans rien créer, l'échec
+précédant `make apply`.
+
+Un quatrième, attrapé avant tout commit : j'avais écrit **de mémoire** les empreintes de commit de deux
+actions GitHub. Elles étaient fausses. Résolues par l'API avant publication.
+
+## Coût et destruction
+
+L'instance facture environ **0,45 USD par jour** : `t2.micro` à la demande, adresse IPv4 publique
+(facturée depuis février 2024) et volume `gp3`. Le palier gratuit est **par compte, pas par étudiant** —
+avec plusieurs instances actives dans ce compte partagé, les 750 h mensuelles partent en une semaine.
+
+Le pipeline accepte une entrée `destroy_after` qui détruit l'instance en fin d'exécution. En local :
+
+```bash
+make destroy && make leftovers
+```
+
+`make leftovers` filtre sur l'étiquette `Project` : il ne montre que ses propres ressources et ne peut
+donc **jamais** désigner celle d'un camarade. Dans un compte partagé, une capture de la page de
+facturation ne prouverait rien d'individuel — elle agrège la dépense de toute la promotion. C'est
+l'inventaire filtré par étiquette qui fait preuve, ce qui donne à l'étiquetage systématique une
+justification comptable en plus de l'inventaire.
+
+Vérifié après le run : aucune instance, aucun volume, aucune IP élastique, aucun sous-réseau portant
+mon étiquette. État Terraform à zéro ressource gérée.
+
+## Limites
+
+- **L'OIDC est hors de portée** faute de permissions IAM : des clés longue durée subsistent en secrets.
+- **L'environnement `aws-dev` n'a pas de relecteur obligatoire**, pour que la démonstration s'enchaîne.
+  L'ajouter met une approbation humaine devant chaque `apply`, y compris ceux du formateur.
+- **`sha_pinning_required` est désactivé** au niveau du dépôt. Mes actions sont épinglées par
+  discipline ; activer ce réglage l'imposerait à tout futur workflow.
+- **Une seule racine, un seul environnement.** Pas de `staging`, pas de modules réutilisables : le
+  périmètre du devoir ne les demandait pas et un module qui expose quarante variables est plus difficile
+  à utiliser que la ressource brute.
 
 ## À retenir
 
-- `use_lockfile` vaut **`false` par défaut**. Un backend S3 sans cette ligne est un backend sans
-  verrou, et rien ne le signale.
-- **Le style d'écriture détermine la capacité de détection** : règles de pare-feu en ligne → dérive
-  détectée ; ressources de règles séparées → règle manuelle invisible.
-- Un bucket parfaitement durci ne protège pas d'un principal légitime du compte. Dans un compte
-  partagé, le contrôle qui manque est **IAM**, et aucun réglage S3 ne le remplace.
-- `sensitive = true` ne concerne que l'affichage : ni le JSON (`terraform show -json`), ni l'état.
-- Le **fichier de plan** est aussi sensible que l'état : mêmes valeurs, même traitement,
-  `.gitignore` compris.
-- `user_data` sans `user_data_replace_on_change` produit une dérive silencieuse **créée par
-  Terraform** : plan vert, machine inchangée.
-- `plan` n'est pas en lecture seule (CICD-SEC-04) : providers exécutés localement, data sources
-  `external`/`http`, provisioners. Ici les appels étaient en lecture, mais c'est une propriété du
-  code exécuté, pas de la commande.
-- IMDSv2 aurait cassé la chaîne Capital One sans corriger sa cause racine : un rôle IAM
-  sur-privilégié. Les deux contrôles ne se substituent pas.
+- La condition de provisionnement doit vivre **dans le Makefile autant que dans la CI**. Une garantie
+  qui ne fonctionne que sur GitHub n'est pas une propriété du code.
+- `terraform plan` **n'est pas** en lecture seule. C'est ce qui justifie de ne jamais lui donner
+  d'identifiants sur du code non relu.
+- Une dérogation de sécurité s'écrit **à côté du code qu'elle concerne**, avec sa raison et sa date
+  d'expiration. Un fichier d'exclusions séparé devient vite une liste que personne ne relit.
+- Un tag est un pointeur mutable ; une empreinte est une identité. Vrai pour les actions GitHub, les
+  modules Terraform, les images de conteneur — et les AMI.
+- **Le code qui ne tourne que sur la machine qui l'a écrit ne tourne pas.** Trois défauts sur trois
+  n'ont été trouvés qu'en exécutant ailleurs.
