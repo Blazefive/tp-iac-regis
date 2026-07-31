@@ -145,6 +145,7 @@ Aucune intervention entre les étapes. Après exécution : aucune instance, aucu
 |---|---|
 | `pull_request`, jamais `pull_request_target` | la seconde forme exécute le code de la PR **avec** les secrets |
 | Job de déploiement en `workflow_dispatch` | exige le droit d'écriture : aucun visiteur ne peut le lancer |
+| Environnement limité aux branches protégées | `workflow_dispatch` accepte **n'importe quelle** branche ; seule `main` atteint les secrets AWS |
 | Actions épinglées par empreinte de commit | un tag est mutable — cf. CVE-2025-30066 sur `tj-actions/changed-files` |
 | `permissions: contents: read` | le `GITHUB_TOKEN` ne peut rien écrire |
 | Règle SSH temporaire pour la seule IP du runner, révoquée en `if: always()` | les runners ont des adresses dynamiques ; ouvrir 22 au monde annulerait l'exercice |
