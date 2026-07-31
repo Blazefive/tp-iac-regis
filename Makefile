@@ -3,13 +3,9 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 MAKEFLAGS += --warn-undefined-variables --no-print-directory
 
-# A dedicated AWS profile on a workstation, so the machine default profile is
-# left alone.
-#
-# NOT exported when AWS_ACCESS_KEY_ID is already in the environment. A CI runner
-# authenticates with key variables and has no ~/.aws/credentials, so exporting
-# AWS_PROFILE there makes the provider look for a profile that does not exist
-# and fail with "failed to get shared config profile, tp2".
+# Not exported when AWS_ACCESS_KEY_ID is already set: a CI runner authenticates
+# with key variables and has no ~/.aws/credentials, so exporting AWS_PROFILE
+# there makes the provider fail with "failed to get shared config profile".
 ifndef AWS_ACCESS_KEY_ID
 AWS_PROFILE ?= tp2
 export AWS_PROFILE
@@ -26,9 +22,7 @@ ANSIBLE_DIR := ansible
 INVENTORY   := $(ANSIBLE_DIR)/inventory.generated.ini
 PLAYBOOK    ?= yoxii.yml
 
-# One variable drives BOTH the reachability probe and ansible-playbook. It was
-# hardcoded at first and the local run failed on step 4 while CI would have
-# passed - a bug that only appears off the golden path.
+# One variable drives both the reachability probe and ansible-playbook.
 #   CI    : the secret is written to this default path.
 #   local : make configure SSH_KEY=~/.ssh/tp2_ed25519
 SSH_KEY ?= $(HOME)/.ssh/id_ed25519
@@ -42,9 +36,6 @@ help: ## list available targets
 
 # =============================================================================
 # STEP 1 - Infrastructure code validation
-#
-# Three gates, in this order, each failing the build on a non-zero exit.
-# `verify` chains them; make stops on the first failing prerequisite.
 # =============================================================================
 
 fmt: ## STEP 1a - check Terraform formatting (does not rewrite)
@@ -53,10 +44,9 @@ fmt: ## STEP 1a - check Terraform formatting (does not rewrite)
 tflint: ## STEP 1b - lint the Terraform for errors and bad practice
 	@cd $(ROOT) && tflint --init >/dev/null && tflint --format compact
 
-# .terraform and *.tfplan are excluded on purpose. With a plan file present trivy
-# scans the PLAN SNAPSHOT instead of the HCL, and inline `#trivy:ignore:`
-# comments - which live in the HCL - stop applying, so the gate goes red on
-# exceptions that were already justified in the code.
+# .terraform and *.tfplan excluded: with a plan file present trivy scans the
+# plan snapshot instead of the HCL, and inline #trivy:ignore comments stop
+# applying, turning already-justified exceptions red.
 trivy: ## STEP 1c - scan the Terraform for security misconfiguration
 	trivy config --quiet --exit-code 1 --severity MEDIUM,HIGH,CRITICAL \
 	  --skip-dirs '**/.terraform' --skip-files '**/*.tfplan' $(ROOT)
@@ -67,8 +57,8 @@ verify: fmt tflint trivy ## STEP 1 - all validation gates, in order
 # =============================================================================
 # STEP 2 - Provisioning, only once STEP 1 is green
 #
-# `apply` depends on `verify`, so the condition holds when the target is run
-# from a laptop too, where no GitHub job graph exists to enforce it.
+# apply depends on verify, so the condition holds from a laptop too, where no
+# GitHub job graph exists to enforce it.
 # =============================================================================
 
 ip: ## print your public IP as a /32, for admin_cidr
@@ -169,8 +159,8 @@ teardown: check-backend ## delete the state bucket -- AFTER destroy, never befor
 	rm -f $(BACKEND); \
 	printf '%s deleted\n' "$$bucket"
 
-# The training AWS account is SHARED: every lookup filters on the Project tag,
-# so it can never point at - let alone delete - a classmate's resource.
+# Every lookup filters on the Project tag: the shared training account means it
+# must never point at, let alone delete, a classmate's resource.
 leftovers: ## find MY forgotten billable resources
 	@printf -- '-- instances --\n'
 	@aws ec2 describe-instances --filters "Name=tag:Project,Values=$(PROJECT)" \

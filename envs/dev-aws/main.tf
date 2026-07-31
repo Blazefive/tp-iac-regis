@@ -1,9 +1,7 @@
-# M3 lab 2 - public nginx web server, hardened, with encrypted remote state.
-# One root module, one resource file: eight resources, no abstraction that does
-# not serve the assignment.
+# Public web server, hardened, with encrypted remote state.
 
 terraform {
-  required_version = ">= 1.10" # ephemeral values and native S3 locking
+  required_version = ">= 1.10"
 
   required_providers {
     aws = {
@@ -12,28 +10,21 @@ terraform {
     }
   }
 
-  # PARTIAL configuration on purpose. A backend block accepts neither variables
-  # nor interpolation, so the bucket name - which carries the AWS account id -
-  # cannot live in terraform.tfvars. It is supplied at init time instead:
-  #
-  #   terraform init -backend-config=backend.hcl
-  #
-  # The bucket itself is created outside Terraform (`make bootstrap`): a root
-  # module cannot manage the backend it relies on.
+  # Partial configuration: a backend block accepts no variables, and the bucket
+  # name carries the AWS account id. Supplied at init time via backend.hcl.
   backend "s3" {
     key          = "dev-aws/terraform.tfstate"
-    region       = "eu-west-3" # must be a literal, hence duplicated from var.region
-    encrypt      = true        # server-side encryption enforced on write
-    use_lockfile = true        # native S3 locking - defaults to FALSE
+    region       = "eu-west-3" # literal required, hence duplicated from var.region
+    encrypt      = true
+    use_lockfile = true # native S3 locking, defaults to false
   }
 }
 
 provider "aws" {
   region = var.region
 
-  # Every resource inherits these tags, including the ones we would forget. The
-  # training account is shared between students: without Project and Owner,
-  # nobody can tell who a resource belongs to.
+  # The training account is shared: without Project and Owner, nobody can tell
+  # who a resource belongs to.
   default_tags {
     tags = local.tags
   }
@@ -51,19 +42,10 @@ locals {
 }
 
 # --------------------------------------------------------------- Networking ---
-#
-# The VPC and its internet gateway are READ, not created.
-#
-# Why: the training AWS account is shared, and eu-west-3 sits at its quota of 5
-# VPCs, all belonging to other students. Every other region is refused by an
-# explicit deny in the account IAM policy, so there is nowhere else to go.
-# Deleting someone else's VPC to make room is not an option.
-#
-# What this costs: the root module no longer owns the VPC or the gateway, so
-# `terraform destroy` cannot remove them - which is correct, they were never
-# ours. Everything else stays managed: subnet, route table, association,
-# security group, key pair, instance.
 
+# Read, not created: the shared account is at its quota of 5 VPCs and every
+# other region is denied by IAM. Consequence: destroy cannot remove them, which
+# is correct since they were never ours.
 data "aws_vpc" "main" {
   id = var.vpc_id
 }
@@ -75,16 +57,9 @@ data "aws_internet_gateway" "main" {
   }
 }
 
-# On AWS a subnet lives in exactly ONE availability zone: high availability is
-# written into the topology, not into the resource.
-# trivy AWS-0164 "subnet associates public IP address" is acknowledged. The whole
-# point of this instance is to serve a public web application, so it needs an
-# address the public can reach. The alternative - private subnet, NAT gateway,
-# load balancer - is correct architecture and costs about 35 USD a month for the
-# NAT alone, which is not what a lab account is for.
-#
-# What compensates: SSH is restricted to one /32, IMDSv2 is enforced, egress is
-# narrowed to four ports, and the root volume is encrypted.
+# AWS-0164, public IP on the subnet: this instance exists to serve a public
+# application. The alternative - private subnet plus NAT gateway - costs about
+# 35 USD a month. Compensated by restricted SSH, IMDSv2 and narrowed egress.
 #trivy:ignore:AWS-0164:exp:2026-12-31
 resource "aws_subnet" "public" {
   vpc_id                  = data.aws_vpc.main.id
@@ -96,13 +71,9 @@ resource "aws_subnet" "public" {
 
   lifecycle {
     precondition {
-      # AWS rejects an out-of-range subnet anyway, but failing here names the
-      # problem instead of surfacing InvalidSubnet.Range. Getting this wrong in a
-      # VPC shared with the rest of the class is a real incident.
-      #
-      # There is no cidrcontains() in Terraform 1.15 - it is an OpenTofu
-      # function. Equivalent with core functions: mask the subnet base address
-      # with the VPC prefix length and it must give the VPC base address back.
+      # Naming the problem beats surfacing InvalidSubnet.Range. No cidrcontains()
+      # in Terraform 1.15: mask the subnet base with the VPC prefix length and it
+      # must give the VPC base back.
       condition = cidrhost(
         "${cidrhost(var.public_subnet_cidr, 0)}/${split("/", data.aws_vpc.main.cidr_block)[1]}", 0
       ) == cidrhost(data.aws_vpc.main.cidr_block, 0)
@@ -112,9 +83,8 @@ resource "aws_subnet" "public" {
   }
 }
 
-# Our own route table rather than the VPC main one: the default route table is
-# shared with every other subnet in this VPC, so editing it would change routing
-# for other people's instances.
+# Our own table: editing the VPC main one would change routing for other
+# people's subnets.
 resource "aws_route_table" "public" {
   vpc_id = data.aws_vpc.main.id
 
@@ -133,25 +103,14 @@ resource "aws_route_table_association" "public" {
 
 # ------------------------------------------------------------ Security group --
 #
-# Rules are written as INLINE `ingress` blocks, deliberately. With separate
-# resources (aws_vpc_security_group_ingress_rule), a rule added by hand in the
-# console is an UNMANAGED object: Terraform never sees it and reports no drift,
-# which makes part D of the assignment impossible.
+# Inline ingress blocks, not separate rule resources: a rule added by hand in
+# the console would otherwise be unmanaged, and Terraform would report no drift.
 #
-# Ports and protocols stay hardcoded: they are the definition of the service,
-# not a setting. Same for the hardening below - see variables.tf.
-#
-# AWS restricts descriptions to ^[0-9A-Za-z_ .:/()#,@\[\]+=&;{}!$*-]*$ - no
-# apostrophe, no accent.
+# Descriptions must match ^[0-9A-Za-z_ .:/()#,@\[\]+=&;{}!$*-]*$ - no accent.
 
-# trivy AWS-0104 "unrestricted egress to any IP address" is acknowledged, not
-# silenced. The ports are already narrowed to 443, 80, 53 and 123; what remains
-# is the DESTINATION, and no Ubuntu mirror publishes a stable address
-# range to allowlist. Closing this properly means an outbound proxy or VPC
-# endpoints - the right answer in production, out of scope for a lab.
-#
-# The expiry date is deliberate: an exception without one is a permanent hole
-# that nobody revisits.
+# AWS-0104, unrestricted egress: the ports are already narrowed below; what
+# remains is the destination, and no package mirror publishes a stable address
+# range. Closing it properly needs an outbound proxy or VPC endpoints.
 #trivy:ignore:AWS-0104:exp:2026-12-31
 resource "aws_security_group" "web" {
   name        = "${local.prefix}-web"
@@ -163,8 +122,8 @@ resource "aws_security_group" "web" {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    # coalesce, not a hardcoded 0.0.0.0/0: with http_cidr left unset the service
-    # is reachable only from the administration address. See variables.tf.
+    # coalesce, not a hardcoded 0.0.0.0/0: left unset, the service is reachable
+    # only from the administration address.
     cidr_blocks = [coalesce(var.http_cidr, var.admin_cidr)]
   }
 
@@ -184,14 +143,8 @@ resource "aws_security_group" "web" {
     cidr_blocks = [coalesce(var.game_cidr, var.admin_cidr)]
   }
 
-  # Egress is restricted to what the machine actually needs, instead of the
-  # usual protocol = "-1" on every port. An instance that can only reach package
-  # repositories, DNS and NTP is a poor foothold: no arbitrary outbound port for
-  # a reverse shell, no exfiltration over a random high port.
-  #
-  # The destination still has to be 0.0.0.0/0 - nobody can allowlist every
-  # Ubuntu mirror by address - which is why trivy's AWS-0104 is acknowledged
-  # below rather than silenced.
+  # Egress narrowed to what the machine needs, instead of the usual protocol
+  # "-1" on every port: no arbitrary outbound port for a reverse shell.
 
   egress {
     description = "HTTPS out: package repositories and PyPI"
@@ -262,25 +215,22 @@ resource "aws_instance" "web" {
   vpc_security_group_ids = [aws_security_group.web.id]
   key_name               = aws_key_pair.admin.key_name
 
-  # ---- Hardening: hardcoded on purpose, never a variable --------------------
-  # A security control exposed as a variable becomes optional, and an optional
-  # control with an unsafe provider default is exactly the root cause the course
-  # documents (Saltzer & Schroeder, fail-safe defaults).
+  # Hardening below is hardcoded, never a variable: an optional control with an
+  # unsafe provider default is how misconfiguration gets industrialised.
 
   metadata_options {
     http_endpoint = "enabled"
 
-    # IMDSv2 enforced. This attribute has NO safe default: the AWS default is
-    # still "optional". Capital One, March 2019.
+    # IMDSv2. No safe default: the AWS default is still "optional".
     http_tokens = "required"
 
-    # A single network hop: blocks relaying through a reverse proxy or a poorly
-    # isolated container. Raise to 2 only when running containers.
+    # One hop: blocks relaying through a reverse proxy or a weakly isolated
+    # container. Raise to 2 only when running containers.
     http_put_response_hop_limit = 1
   }
 
   root_block_device {
-    encrypted   = true # never a variable, see above
+    encrypted   = true
     volume_type = var.root_volume_type
     volume_size = var.root_volume_size_gb
   }
@@ -295,30 +245,25 @@ resource "aws_instance" "web" {
     echo "<h1>${local.prefix} - deployed by Terraform</h1>" >/var/www/html/index.html
     systemctl enable --now nginx
 
-    # Authorise the Ansible control node on the default user. Terraform creates
-    # the host and gets it serving; Ansible takes over from there. Without this
-    # the instance is unreachable to configuration management, and the only way
-    # in is the operator laptop -- which does not scale and is not auditable.
+    # Authorise the Ansible control node. Terraform gets the host serving;
+    # Ansible takes over from there.
     install -d -m 700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
     printf '%s\n' '${var.ansible_control_public_key}' >>/home/ubuntu/.ssh/authorized_keys
     chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
     chmod 600 /home/ubuntu/.ssh/authorized_keys
   EOT
 
-  # Without this line, changing user_data changes NOTHING on a running instance:
-  # the script only runs on first boot, so the plan is green while the machine
-  # keeps the old configuration. Set to true, the instance is replaced instead -
-  # the immutable model.
+  # Without this, editing user_data changes nothing on a running instance: the
+  # script only runs on first boot, so the plan is green while the machine keeps
+  # the old configuration. Replaced instead - the immutable model.
   user_data_replace_on_change = true
 
-  # Tag VALUES accept Unicode, unlike security group descriptions, which AWS
-  # restricts to ^[0-9A-Za-z_ .:/()#,@\[\]+=&;{}!$*-]*$ - no accent, no
-  # apostrophe. So the accented name is fine here and would be rejected there.
+  # Tag values accept Unicode, unlike security group descriptions.
   tags = { Name = var.instance_name }
 }
 
-# Assertion re-evaluated on every plan and apply, after the state refresh: this
-# is the drift detector for part D. It warns without blocking.
+# Re-evaluated on every plan and apply, after the state refresh: the drift
+# detector. Warns without blocking.
 check "ssh_never_open_to_the_world" {
   assert {
     condition = !contains(
