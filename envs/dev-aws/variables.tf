@@ -68,6 +68,51 @@ variable "availability_zone_suffix" {
   }
 }
 
+variable "http_cidr" {
+  # null means "the same as admin_cidr", i.e. restricted. That is the fail-safe
+  # default: opening the service to the internet has to be written down
+  # explicitly, it is never what you get by forgetting to set a value.
+  #
+  # What this host serves is GLPI, an administration console with well-known
+  # default accounts (glpi/glpi, tech/tech...). A public website belongs on
+  # 0.0.0.0/0; an admin console does not.
+  description = "Source allowed on port 80. Leave null to restrict it to admin_cidr; set 0.0.0.0/0 only for a genuinely public site."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.http_cidr == null || can(cidrhost(var.http_cidr, 0))
+    error_message = "http_cidr must be a valid CIDR block, or null."
+  }
+}
+
+variable "game_port" {
+  # A second service on its own port, deliberately separate from 80. What runs
+  # on 80 here is an administration console; what runs here is a public game.
+  # Different audiences, different exposure, so a different rule.
+  description = "TCP port of the public game. Set game_cidr to control who reaches it."
+  type        = number
+  default     = 8080
+
+  validation {
+    condition     = var.game_port > 1024 && var.game_port < 65536
+    error_message = "game_port must be an unprivileged port, between 1025 and 65535."
+  }
+}
+
+variable "game_cidr" {
+  # Unlike http_cidr, this one defaults to null too: nothing is exposed unless
+  # someone writes it down.
+  description = "Source allowed on game_port. Leave null to restrict to admin_cidr; set 0.0.0.0/0 to open it to everyone."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.game_cidr == null || can(cidrhost(var.game_cidr, 0))
+    error_message = "game_cidr must be a valid CIDR block, or null."
+  }
+}
+
 variable "instance_name" {
   description = "Name tag of the EC2 instance, as shown in the console."
   type        = string
@@ -152,13 +197,7 @@ variable "ssh_public_key_path" {
   default     = "~/.ssh/tp2_ed25519.pub"
 }
 
-variable "vpc_cidr" {
-  description = "Address range of the VPC."
-  type        = string
-  default     = "10.20.0.0/16"
-
-  validation {
-    condition     = can(cidrhost(var.vpc_cidr, 0))
-    error_message = "vpc_cidr must be a valid CIDR block."
-  }
-}
+# vpc_cidr was removed: the VPC is read as a data source, not created here, so
+# the variable had no reader left. tflint's terraform_unused_declarations rule
+# caught it - which is the whole point of running a linter over infrastructure
+# code rather than only asking whether it parses.

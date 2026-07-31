@@ -1,7 +1,12 @@
 # Outputs, alphabetical.
 
+output "instance_public_ip" {
+  description = "Public IPv4 address of the instance. Consumed by `make inventory` to build the Ansible inventory."
+  value       = aws_instance.web.public_ip
+}
+
 output "public_url" {
-  description = "URL of the nginx web server."
+  description = "URL of the web server."
   value       = "http://${aws_instance.web.public_ip}"
 }
 

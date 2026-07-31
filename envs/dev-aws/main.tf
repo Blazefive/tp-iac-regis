@@ -77,6 +77,15 @@ data "aws_internet_gateway" "main" {
 
 # On AWS a subnet lives in exactly ONE availability zone: high availability is
 # written into the topology, not into the resource.
+# trivy AWS-0164 "subnet associates public IP address" is acknowledged. The whole
+# point of this instance is to serve a public web application, so it needs an
+# address the public can reach. The alternative - private subnet, NAT gateway,
+# load balancer - is correct architecture and costs about 35 USD a month for the
+# NAT alone, which is not what a lab account is for.
+#
+# What compensates: SSH is restricted to one /32, IMDSv2 is enforced, egress is
+# narrowed to four ports, and the root volume is encrypted.
+#trivy:ignore:AWS-0164:exp:2026-12-31
 resource "aws_subnet" "public" {
   vpc_id                  = data.aws_vpc.main.id
   cidr_block              = var.public_subnet_cidr
@@ -135,17 +144,28 @@ resource "aws_route_table_association" "public" {
 # AWS restricts descriptions to ^[0-9A-Za-z_ .:/()#,@\[\]+=&;{}!$*-]*$ - no
 # apostrophe, no accent.
 
+# trivy AWS-0104 "unrestricted egress to any IP address" is acknowledged, not
+# silenced. The ports are already narrowed to 443, 80, 53 and 123; what remains
+# is the DESTINATION, and no Ubuntu mirror publishes a stable address
+# range to allowlist. Closing this properly means an outbound proxy or VPC
+# endpoints - the right answer in production, out of scope for a lab.
+#
+# The expiry date is deliberate: an exception without one is a permanent hole
+# that nobody revisits.
+#trivy:ignore:AWS-0104:exp:2026-12-31
 resource "aws_security_group" "web" {
   name        = "${local.prefix}-web"
   description = "Public HTTP - SSH restricted to the admin host"
   vpc_id      = data.aws_vpc.main.id
 
   ingress {
-    description = "HTTP from the Internet"
+    description = "HTTP from the allowed source"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    # coalesce, not a hardcoded 0.0.0.0/0: with http_cidr left unset the service
+    # is reachable only from the administration address. See variables.tf.
+    cidr_blocks = [coalesce(var.http_cidr, var.admin_cidr)]
   }
 
   ingress {
@@ -156,11 +176,60 @@ resource "aws_security_group" "web" {
     cidr_blocks = [var.admin_cidr]
   }
 
+  ingress {
+    description = "Public game port"
+    from_port   = var.game_port
+    to_port     = var.game_port
+    protocol    = "tcp"
+    cidr_blocks = [coalesce(var.game_cidr, var.admin_cidr)]
+  }
+
+  # Egress is restricted to what the machine actually needs, instead of the
+  # usual protocol = "-1" on every port. An instance that can only reach package
+  # repositories, DNS and NTP is a poor foothold: no arbitrary outbound port for
+  # a reverse shell, no exfiltration over a random high port.
+  #
+  # The destination still has to be 0.0.0.0/0 - nobody can allowlist every
+  # Ubuntu mirror by address - which is why trivy's AWS-0104 is acknowledged
+  # below rather than silenced.
+
   egress {
-    description = "Unrestricted egress (package updates)"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "HTTPS out: package repositories and PyPI"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "HTTP out: package repositories still serving plain HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "DNS over UDP"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "DNS over TCP, for answers too large for UDP"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "NTP, without which the clock drifts and TLS starts failing"
+    from_port   = 123
+    to_port     = 123
+    protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
