@@ -61,8 +61,18 @@ env:
   # written to the runner disk. The two key-related variables are NOT here: they
   # are derived from the private key secret in the "Prepare the SSH key" step,
   # so the key material has a single source.
-  TF_VAR_admin_cidr: ${{ vars.ADMIN_CIDR }}
-  TF_VAR_vpc_id: ${{ vars.VPC_ID }}
+  # Des SECRETS, pas des variables de depot - et la nuance n'est pas cosmetique.
+  # Sur un depot public les journaux d'execution sont publics eux aussi, et
+  # GitHub ne masque QUE les secrets. En variables, ces deux valeurs
+  # apparaissaient en clair 35 fois par execution : l'adresse IP personnelle de
+  # l'administrateur, donc son fournisseur d'acces et sa localisation
+  # approximative, dans un journal permanent lie a un compte nomme.
+  #
+  # Le masquage reste une substitution de chaine : il couvre la valeur exacte,
+  # pas une forme derivee. D'ou le stockage sous la forme /32, celle que
+  # Terraform et l'AWS CLI impriment reellement.
+  TF_VAR_admin_cidr: ${{ secrets.ADMIN_CIDR }}
+  TF_VAR_vpc_id: ${{ secrets.VPC_ID }}
   # Vide en mode prive : la variable Terraform retombe alors sur son defaut
   # `null`, et coalesce() restreint le port applicatif a admin_cidr.
   TF_VAR_game_cidr: ${{ inputs.acces == 'public' && '0.0.0.0/0' || '' }}
