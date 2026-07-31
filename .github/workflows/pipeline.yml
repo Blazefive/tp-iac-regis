@@ -106,6 +106,15 @@ jobs:
         run: make fmt
 
       - name: make tflint
+        env:
+          # `tflint --init` telecharge le ruleset AWS depuis l'API GitHub. Sans
+          # jeton la requete est anonyme, et le quota anonyme de 60 requetes/heure
+          # est compte PAR ADRESSE IP, pas par depot : sur un runner heberge cette
+          # adresse est partagee avec le reste du monde et le quota est deja
+          # consomme. D'ou un `403 rate limit exceeded` qui met l'etape au rouge
+          # sans qu'une ligne de Terraform soit en cause. Le jeton du workflow
+          # (permissions: contents: read) suffit a passer sur le quota par depot.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: make tflint
 
       - name: make trivy
@@ -122,11 +131,32 @@ jobs:
   # so the same rule holds when the target is run from a laptop, where no
   # GitHub job graph exists to enforce it. A safety property that only works
   # inside CI is not a property of the code.
+  #
+  # LA DESTRUCTION, ELLE, N'EST PAS CONDITIONNEE AUX VALIDATIONS.
+  #
+  # C'etait un vrai defaut : `needs:` seul fait sauter le job ENTIER quand une
+  # porte est rouge, etape de destruction comprise. Un `tflint` casse par une
+  # limite d'API - donc sans rapport avec l'infrastructure - a ainsi laisse une
+  # instance en marche sans aucun moyen de la supprimer depuis le pipeline.
+  #
+  # Conditionner la CREATION aux validations est la consigne. Y conditionner la
+  # DESTRUCTION transforme la moindre panne de linter en facture, et pousse a
+  # aller nettoyer a la main dans la console - exactement ce que l'IaC cherche a
+  # eviter. Une sortie de secours ne doit jamais dependre de ce qui peut casser.
+  #
+  # `!cancelled()` est indispensable : sans une fonction d'etat explicite, GitHub
+  # ajoute un `success()` implicite a la condition et saute le job malgre tout.
+  # L'egalite `needs.validate.result == 'success'` reprend alors le role de garde
+  # pour tout ce qui cree, et `make apply` reste par ailleurs saute en mode
+  # `detruire` : rien ne peut etre provisionne par cette porte.
   # ===========================================================================
   deploy:
     name: "2-4. EC2, inventory, Ansible"
     needs: validate
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      !cancelled()
+      && github.event_name == 'workflow_dispatch'
+      && (needs.validate.result == 'success' || inputs.action == 'detruire')
     runs-on: ubuntu-latest
     environment: aws-dev # a required reviewer here gates the apply
     outputs:
@@ -199,8 +229,11 @@ jobs:
 
       # ---- STEP 2 -------------------------------------------------------
       - name: make apply
-        # Re-runs make verify as a prerequisite before touching AWS.
+        # Re-runs make verify as a prerequisite before touching AWS - d'ou le
+        # meme besoin de jeton que dans le job de validation.
         if: inputs.action != 'detruire'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: make apply
 
       # ---- SSH access for this run only ---------------------------------

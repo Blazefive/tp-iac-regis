@@ -66,6 +66,37 @@ de travail contournerait la validation.
 `make inventory` et `make configure` sont tous **`skipped`** et aucune ressource n'est créée. Le run
 `30618245903` passe les trois portes et déroule la suite.
 
+### Ce que la condition ne doit surtout pas couvrir : la destruction
+
+`needs:` fait sauter le **job entier** dès qu'une porte est rouge — étape de destruction comprise. Le
+run `30621787033` l'a montré en conditions réelles : `tflint` a échoué sur un `403 rate limit
+exceeded` de l'API GitHub — `tflint --init` télécharge son ruleset AWS en anonyme, et le quota de 60
+requêtes/heure se compte **par adresse IP**, laquelle est partagée sur un runner hébergé. Une panne
+sans le moindre rapport avec l'infrastructure a donc rendu une instance en marche impossible à
+supprimer depuis le pipeline. Elle a facturé jusqu'à un `terraform destroy` lancé à la main.
+
+Deux corrections, une par défaut :
+
+- **La cause** : le jeton du workflow est passé aux étapes qui invoquent `tflint`, ce qui bascule sur
+  le quota par dépôt. Il ne porte que `contents: read` et n'est monté que sur ces deux étapes.
+- **Le défaut de conception** : la destruction ne dépend plus des validations.
+
+```yaml
+if: >-
+  !cancelled()
+  && github.event_name == 'workflow_dispatch'
+  && (needs.validate.result == 'success' || inputs.action == 'detruire')
+```
+
+`!cancelled()` est indispensable : sans fonction d'état explicite, GitHub ajoute un `success()`
+implicite et saute le job malgré tout. L'égalité `needs.validate.result == 'success'` reprend alors
+le rôle de garde pour tout ce qui crée, et `make apply` reste par ailleurs sauté en mode `detruire`.
+La consigne de l'étape 2 est donc intacte : rien ne peut être provisionné par cette porte.
+
+**Une sortie de secours ne doit jamais dépendre de ce qui peut casser.** Conditionner la création aux
+validations est la consigne ; y conditionner la destruction transforme la moindre panne de linter en
+facture et pousse à nettoyer à la main dans la console — précisément ce que l'IaC cherche à éviter.
+
 ## Étape 3 — Récupération de l'adresse IP et génération de l'inventaire
 
 `make inventory` lit la sortie Terraform et écrit le fichier au format attendu par Ansible :
