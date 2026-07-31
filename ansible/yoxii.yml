@@ -1,0 +1,322 @@
+---
+# Yoxii in multiplayer: nginx serves the page and proxies the WebSocket to a
+# small Python service that owns the rules and the rooms.
+#
+#   ansible-playbook yoxii.yml -e target=control        # the VM, port 8080
+#   ansible-playbook yoxii.yml -e yoxii_http_port=9000
+#
+# Run it twice: the second run must report changed=0.
+
+- name: Yoxii
+  hosts: "{{ target | default('web') }}"
+  become: true
+  gather_facts: true
+
+  vars:
+    yoxii_http_port: 8080
+    yoxii_ws_port: 8765
+    site_source: files/yoxii
+    web_root: /var/www/yoxii
+    app_dir: /opt/yoxii
+    venv: /opt/yoxii/venv
+    static_files: [index.html, style.css, app.js]
+
+  pre_tasks:
+    - name: Refuse to run on a host that is not Debian family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'Debian'
+        fail_msg: >-
+          Only Debian family hosts are handled. {{ inventory_hostname }} reports
+          {{ ansible_facts['os_family'] }}.
+        success_msg: >-
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+      tags: [always]
+
+  tasks:
+    - name: Install nginx and the tools to build a virtualenv
+      # NOT python3-websockets: the package exists on Ubuntu 26.04 but not on
+      # 24.04, so a playbook written on one and run on the other fails on the
+      # first task. A virtualenv works on both and pins the version, which the
+      # distribution package cannot.
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - python3-venv
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      tags: [packages]
+
+    # ---- Game server ------------------------------------------------------
+
+    - name: Create a system account for the game server
+      # Its own unprivileged account, no login shell, no home to speak of. The
+      # service reads one file and opens one socket; it needs nothing else.
+      ansible.builtin.user:
+        name: yoxii
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ app_dir }}"
+        create_home: false
+      tags: [server]
+
+    - name: Create the application directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [server]
+
+    - name: Create the virtualenv
+      ansible.builtin.command:
+        cmd: /usr/bin/python3 -m venv {{ venv }}
+        creates: "{{ venv }}/bin/python"
+      tags: [server]
+
+    - name: Install the WebSocket library, pinned
+      # Pinned rather than latest: the same playbook must build the same server
+      # in six months. This is the AMI lesson applied to Python dependencies.
+      ansible.builtin.pip:
+        name: "websockets==15.0.1"
+        virtualenv: "{{ venv }}"
+        state: present
+      notify: Restart yoxii
+      tags: [server]
+
+    - name: Deploy the game server
+      ansible.builtin.copy:
+        src: "{{ site_source }}/server.py"
+        dest: "{{ app_dir }}/server.py"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart yoxii
+      tags: [server]
+
+    - name: Install the systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/yoxii.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible. Local edits will be overwritten.
+          [Unit]
+          Description=Yoxii multiplayer game server
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=yoxii
+          Group=yoxii
+          # Bound to the loopback: the only way in is through nginx, which
+          # terminates the HTTP side and forwards the upgrade.
+          Environment=YOXII_HOST=127.0.0.1
+          Environment=YOXII_PORT={{ yoxii_ws_port }}
+          ExecStart={{ venv }}/bin/python {{ app_dir }}/server.py
+          Restart=on-failure
+          RestartSec=2
+
+          # The process reads one file and answers a socket. Everything else is
+          # taken away rather than merely unused.
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ProtectKernelTunables=true
+          ProtectControlGroups=true
+          RestrictAddressFamilies=AF_INET AF_INET6
+          RestrictNamespaces=true
+          MemoryMax=256M
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart yoxii
+      tags: [server]
+
+    - name: Enable and start the game server
+      ansible.builtin.systemd_service:
+        name: yoxii
+        state: started
+        enabled: true
+        daemon_reload: true
+      tags: [server]
+
+    # ---- Static site ------------------------------------------------------
+
+    - name: Create the document root
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [content]
+
+    - name: Deploy the page
+      # server.py is deliberately NOT copied here: it belongs to the service, not
+      # to the document root, and serving it would publish the game logic.
+      ansible.builtin.copy:
+        src: "{{ site_source }}/{{ item }}"
+        dest: "{{ web_root }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ static_files }}"
+      tags: [content]
+
+    - name: Configure the nginx site
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/yoxii.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible. Local edits will be overwritten.
+          server {
+              listen {{ yoxii_http_port }};
+              listen [::]:{{ yoxii_http_port }};
+              server_name _;
+
+              root {{ web_root }};
+              index index.html;
+              server_tokens off;
+
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+
+              location /ws {
+                  proxy_pass http://127.0.0.1:{{ yoxii_ws_port }};
+                  # The three lines that make a WebSocket work through a proxy.
+                  # Without them nginx answers 400 and the upgrade never happens.
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  # A game can sit idle between moves; the default 60s would cut
+                  # the socket mid-game.
+                  proxy_read_timeout 3600s;
+                  proxy_send_timeout 3600s;
+              }
+
+              # connect-src 'self' covers the WebSocket: same host, same port.
+              add_header Content-Security-Policy "default-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'" always;
+              add_header X-Content-Type-Options nosniff always;
+              add_header Referrer-Policy no-referrer always;
+          }
+      notify: Reload nginx
+      tags: [web]
+
+    - name: Enable the Yoxii site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/yoxii.conf
+        dest: /etc/nginx/sites-enabled/yoxii.conf
+        state: link
+      notify: Reload nginx
+      tags: [web]
+
+    - name: Check that nginx accepts its configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      check_mode: false
+      tags: [web]
+
+    - name: Apply everything before testing it
+      ansible.builtin.meta: flush_handlers
+      tags: [web]
+
+  post_tasks:
+    - name: Check that the page is served
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ yoxii_http_port }}/{{ item }}"
+        method: HEAD
+        status_code: 200
+      loop: "{{ static_files }}"
+      changed_when: false
+      check_mode: false
+      tags: [verify]
+
+    - name: Check that server.py is NOT reachable over HTTP
+      # It sits outside the document root; proving that beats assuming it.
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ yoxii_http_port }}/server.py"
+        status_code: 404
+      changed_when: false
+      check_mode: false
+      tags: [verify]
+
+    - name: Play a full two-client handshake against the real server
+      # The only test that proves multiplayer works: open two sockets, check they
+      # land in the SAME room on opposite colours, then play one legal move and
+      # confirm the other client is told about it.
+      ansible.builtin.command:
+        cmd: "{{ venv }}/bin/python -"
+        stdin: |
+          import asyncio, json, sys
+          import websockets
+
+          URL = "ws://127.0.0.1:{{ yoxii_http_port }}/ws"
+
+          async def main():
+              async with websockets.connect(URL) as a, websockets.connect(URL) as b:
+                  wa = json.loads(await a.recv())
+                  wb = json.loads(await b.recv())
+                  assert wa["type"] == "welcome" and wb["type"] == "welcome"
+                  assert wa["room"] == wb["room"], "clients in different rooms"
+                  assert {wa["side"], wb["side"]} == {"W", "R"}, "same colour twice"
+                  assert wa["side"] == "W", "the opener must play White"
+
+                  # Drain the state pushes that follow each join.
+                  async def latest(ws):
+                      msg = json.loads(await ws.recv())
+                      while msg.get("type") != "state":
+                          msg = json.loads(await ws.recv())
+                      return msg
+
+                  await latest(a)
+                  st = await latest(b)
+
+                  target = st["state"]["legal"]["moves"][0]["to"]
+                  await a.send(json.dumps({"type": "move", "to": target}))
+                  after = await latest(b)
+                  assert after["state"]["totem"] == target, "move not broadcast"
+                  assert after["state"]["phase"] == "place"
+
+                  # A move out of turn must be refused.
+                  await b.send(json.dumps({"type": "move", "to": target}))
+                  reply = json.loads(await b.recv())
+                  assert reply["type"] == "error", "out-of-turn move accepted"
+
+                  print("OK room=%s sides=%s/%s totem=%s refus=%s"
+                        % (wa["room"], wa["side"], wb["side"], target, reply["message"]))
+
+          asyncio.run(main())
+      register: e2e
+      changed_when: false
+      check_mode: false
+      tags: [verify]
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "{{ e2e.stdout }}"
+          - "http://{{ ansible_host | default(inventory_hostname) }}:{{ yoxii_http_port }}/"
+      tags: [verify]
+
+  handlers:
+    - name: Restart yoxii
+      ansible.builtin.systemd_service:
+        name: yoxii
+        state: restarted
+        daemon_reload: true
+
+    - name: Reload nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded

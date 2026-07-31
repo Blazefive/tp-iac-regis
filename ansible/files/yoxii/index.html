@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="fr" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yoxii</title>
+  <meta name="description" content="Yoxii, jeu de stratégie abstrait à deux joueurs. Règles officielles Cosmoludo.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a class="skip" href="#plateau">Aller au plateau</a>
+
+  <header class="bar">
+    <h1>Yoxii</h1>
+
+    <div class="camp" aria-live="polite">
+      <span class="camp__label">Salle</span>
+      <span class="camp__room" id="room-id">…</span>
+      <span class="camp__label">Votre camp</span>
+      <span class="camp__side" id="my-side">
+        <span class="dot" id="my-dot" aria-hidden="true"></span><span id="my-side-name">connexion…</span>
+      </span>
+      <span class="peer" id="peer">seul</span>
+    </div>
+
+    <div class="bar__actions">
+      <button id="new-game" type="button" disabled>Rejouer</button>
+      <button id="show-rules" type="button" aria-expanded="false" aria-controls="rules">Règles</button>
+      <button id="theme-toggle" type="button">Thème</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ---- Joueur rouge (haut) ---- -->
+    <section class="tray tray--R" id="tray-R" aria-label="Réserve du joueur rouge">
+      <header class="tray__head">
+        <span class="dot dot--R" aria-hidden="true"></span>
+        <h2>Rouge</h2>
+        <span class="badge" id="badge-R" hidden>Vous</span>
+        <span class="tray__score" id="score-R">0 pt</span>
+      </header>
+      <div class="tray__pieces" role="group" aria-label="Pièces rouges disponibles"></div>
+    </section>
+
+    <!-- ---- Plateau ---- -->
+    <section class="board-wrap">
+      <p class="status" id="status" role="status" aria-live="polite">Aux blancs de jouer : déplacez le Totem.</p>
+      <div id="plateau" class="board" role="grid" aria-label="Plateau de 37 cases"></div>
+      <p class="hint" id="hint"></p>
+    </section>
+
+    <!-- ---- Joueur blanc (bas) ---- -->
+    <section class="tray tray--W" id="tray-W" aria-label="Réserve du joueur blanc">
+      <header class="tray__head">
+        <span class="dot dot--W" aria-hidden="true"></span>
+        <h2>Blanc</h2>
+        <span class="badge" id="badge-W" hidden>Vous</span>
+        <span class="tray__score" id="score-W">0 pt</span>
+      </header>
+      <div class="tray__pieces" role="group" aria-label="Pièces blanches disponibles"></div>
+    </section>
+
+    <!-- ---- Historique ---- -->
+    <section class="log" aria-label="Historique des coups">
+      <h2>Coups</h2>
+      <ol id="history"></ol>
+    </section>
+  </main>
+
+  <!-- ---- Règles ---- -->
+  <dialog id="rules" aria-labelledby="rules-title">
+    <article>
+      <h2 id="rules-title">Règles</h2>
+
+      <h3>Matériel</h3>
+      <p>
+        Un plateau de <strong>37 cases</strong>, un <strong>Totem</strong>, et
+        <strong>18 pièces</strong> par joueur : cinq <b>O</b> (1 point),
+        cinq <b>II</b> (2), cinq <b>Y</b> (3) et trois <b>X</b> (4).
+      </p>
+
+      <h3>But</h3>
+      <p>
+        Encercler le Totem et totaliser plus de points que l'adversaire au
+        décompte final.
+      </p>
+
+      <h3>Tour de jeu</h3>
+      <p>Les blancs commencent. À son tour, un joueur fait deux choses, dans cet ordre :</p>
+      <ol>
+        <li><strong>Déplacer le Totem</strong>, obligatoirement.</li>
+        <li><strong>Poser une de ses pièces</strong>, de la valeur de son choix.</li>
+      </ol>
+
+      <h3>Déplacement du Totem</h3>
+      <ul>
+        <li>Sur une case libre <strong>directement voisine</strong>, dans n'importe laquelle des huit directions.</li>
+        <li>Ou en <strong>sautant ses propres pièces</strong> si elles forment une ligne continue — orthogonale ou diagonale — menant à une case libre. Sauter une seule pièce est permis.</li>
+        <li>Il est <strong>interdit</strong> de sauter les pièces adverses.</li>
+      </ul>
+
+      <h3>Pose d'une pièce</h3>
+      <p>
+        Sur une case libre <strong>directement autour du Totem</strong> (huit cases au maximum).
+        Si toutes ces cases sont occupées, la pièce se pose sur
+        <strong>n'importe quelle autre case libre</strong> du plateau.
+      </p>
+
+      <h3>Fin de partie</h3>
+      <p>
+        La partie s'arrête dès qu'un joueur <strong>ne peut plus déplacer le Totem</strong> :
+        il est alors forcément encerclé. Chaque joueur compte alors la valeur de ses
+        pièces <strong>adjacentes au Totem</strong> — et elles seules. Le plus grand total l'emporte.
+      </p>
+
+      <h3>Égalité</h3>
+      <p>
+        À points égaux, le joueur ayant le <strong>plus de pièces</strong> autour du Totem
+        l'emporte. Si le nombre de pièces est lui aussi égal, la partie est nulle.
+      </p>
+      <p class="note">
+        La règle officielle départage à points égaux par « la couleur dominante », sans
+        définir le terme. L'interprétation retenue ici est le nombre de pièces adjacentes.
+      </p>
+
+      <h3>Source</h3>
+      <p class="note">
+        Règles officielles Cosmoludo (Tom Delahaye &amp; Jeremy Partinico, 2022).
+      </p>
+
+      <form method="dialog"><button>Fermer</button></form>
+    </article>
+  </dialog>
+
+  <!-- ---- Fin de partie ---- -->
+  <dialog id="over" aria-labelledby="over-title">
+    <article>
+      <h2 id="over-title">Partie terminée</h2>
+      <p id="over-text"></p>
+      <table id="over-table">
+        <thead><tr><th>Joueur</th><th>Pièces autour du Totem</th><th>Points</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <form method="dialog"><button id="over-close">Fermer</button></form>
+    </article>
+  </dialog>
+
+  <footer>
+    <p>Yoxii — Tom Delahaye &amp; Jeremy Partinico, Cosmoludo. Implémentation web d'après les règles officielles.</p>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
