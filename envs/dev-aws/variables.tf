@@ -103,13 +103,17 @@ variable "game_port" {
 variable "game_cidr" {
   # Unlike http_cidr, this one defaults to null too: nothing is exposed unless
   # someone writes it down.
-  description = "Source allowed on game_port. Leave null to restrict to admin_cidr; set 0.0.0.0/0 to open it to everyone."
+  description = "Source allowed on game_port. Leave unset to restrict to admin_cidr; set 0.0.0.0/0 to open it to everyone."
   type        = string
   default     = null
 
   validation {
-    condition     = var.game_cidr == null || can(cidrhost(var.game_cidr, 0))
-    error_message = "game_cidr must be a valid CIDR block, or null."
+    # The empty string counts as unset, not as an error. A CI job cannot easily
+    # omit an environment variable: TF_VAR_game_cidr always exists and carries ""
+    # when the run is private. coalesce() already skips empty strings, so the
+    # only thing that had to change was this guard.
+    condition     = var.game_cidr == null || var.game_cidr == "" || can(cidrhost(var.game_cidr, 0))
+    error_message = "game_cidr must be a valid CIDR block, empty, or null."
   }
 }
 
