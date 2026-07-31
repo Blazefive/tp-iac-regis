@@ -1,0 +1,128 @@
+---
+# Baseline applied to the control node, and to the managed fleet once the web and
+# db groups in inventory.ini are filled in.
+#
+#   ansible-playbook playbook.yml --check --diff        # dry run, changes nothing
+#   ansible-playbook playbook.yml --become-password-file ~/.sudo-pass
+#   ansible-playbook playbook.yml --tags ssh
+#   ansible-playbook playbook.yml --limit lab           # fleet only, not the controller
+#
+# Run it twice. The second run must report changed=0. That is idempotence, and it
+# is the only proof that this file describes a desired state rather than a
+# sequence of actions.
+
+- name: Baseline
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    baseline_packages:
+      - git
+      - jq
+      - tree
+    baseline_timezone: Europe/Paris
+    sshd_dropin: /etc/ssh/sshd_config.d/10-hardening.conf
+
+  pre_tasks:
+    - name: Refuse to run on a host that is not Debian family
+      # Fail on the first task rather than half way through, when some changes
+      # have already been applied and others have not.
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'Debian'
+        fail_msg: >-
+          Only Debian family hosts are handled. {{ inventory_hostname }} reports
+          {{ ansible_facts['os_family'] }}.
+        success_msg: >-
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+          on {{ ansible_facts['architecture'] }}
+      tags: [always]
+
+  tasks:
+    - name: Install the baseline packages
+      # The whole list is handed to apt in ONE transaction. Wrapping this in a
+      # loop would invoke apt once per package: slower, noisier, and it breaks
+      # dependency resolution across the set. Pass a list, never loop a package
+      # module.
+      ansible.builtin.apt:
+        name: "{{ baseline_packages }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      tags: [packages]
+
+    - name: Set the system timezone
+      community.general.timezone:
+        name: "{{ baseline_timezone }}"
+      tags: [time]
+
+    - name: Harden the SSH server
+      # block/rescue is what makes this safe to run over SSH: if the fragment
+      # does not parse, it is withdrawn and the play fails BEFORE the handler
+      # gets a chance to reload sshd. The session running the playbook survives.
+      block:
+        - name: Declare the SSH authentication policy
+          ansible.builtin.copy:
+            dest: "{{ sshd_dropin }}"
+            owner: root
+            group: root
+            mode: "0644"
+            # Numbered 10 deliberately. sshd keeps the FIRST value it reads for a
+            # keyword, and the Include directive sits at the top of sshd_config,
+            # so drop-ins are read before the main file. A 60- file would lose
+            # silently against anything set earlier - including cloud-init's
+            # 50-cloud-init.conf.
+            content: |
+              # Managed by Ansible. Local edits will be overwritten.
+              PasswordAuthentication no
+              KbdInteractiveAuthentication no
+              PermitRootLogin no
+              MaxAuthTries 3
+          notify: Reload sshd
+
+        - name: Check that sshd still accepts its own configuration
+          ansible.builtin.command: sshd -t
+          # A test, not a change: without changed_when the playbook would never
+          # be idempotent. check_mode false keeps the test running under --check.
+          changed_when: false
+          check_mode: false
+
+      rescue:
+        - name: Withdraw the fragment that broke the configuration
+          ansible.builtin.file:
+            path: "{{ sshd_dropin }}"
+            state: absent
+
+        - name: Report why the play stopped
+          ansible.builtin.fail:
+            msg: >-
+              sshd rejected {{ sshd_dropin }}. The file has been removed and sshd
+              was never reloaded, so remote access is unaffected.
+      tags: [ssh]
+
+  # Handlers queued during `tasks` are flushed before `post_tasks` starts, so the
+  # verification below reads the state after any sshd reload, not before it.
+  post_tasks:
+    - name: Read back the effective SSH policy
+      ansible.builtin.command: sshd -T
+      changed_when: false
+      check_mode: false
+      register: sshd_effective
+      tags: [ssh, verify]
+
+    - name: Show the effective SSH policy
+      ansible.builtin.debug:
+        msg: >-
+          {{ sshd_effective.stdout_lines
+             | select('search', '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|maxauthtries)')
+             | list }}
+      tags: [ssh, verify]
+
+  handlers:
+    - name: Reload sshd
+      # reloaded, not restarted: a reload re-reads the configuration without
+      # dropping established sessions.
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: reloaded

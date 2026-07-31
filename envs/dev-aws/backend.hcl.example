@@ -1,0 +1,13 @@
+# Copy to backend.hcl (git-ignored) and set the bucket, or simply run
+# `make bootstrap`, which creates the bucket and writes this file for you.
+#
+#   terraform init -backend-config=backend.hcl
+#
+# Why this file exists at all: a backend block accepts neither variables nor
+# interpolation, so the bucket name cannot live in terraform.tfvars. Partial
+# backend configuration is the only mechanism - and it keeps the AWS account id,
+# which the bucket name embeds, out of a public repository.
+#
+# Naming convention: <project>-tfstate-<account-id>
+
+bucket = "tp-iac-regis-tfstate-000000000000"

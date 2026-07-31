@@ -1,0 +1,58 @@
+# Copy to terraform.tfvars (git-ignored), then set admin_cidr:
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#   make ip        # prints your public IP as a /32
+#
+# Every value below is also the default in variables.tf. It is repeated here so
+# a single file shows the whole configuration surface of this root module.
+#
+# The state bucket is NOT here: a backend block accepts no variables. See
+# backend.hcl.example.
+
+# ---- Required ---------------------------------------------------------------
+
+# Your public IP as a /32. Never 0.0.0.0/0 - two validation blocks reject it.
+admin_cidr = "SET_ME/32"
+
+# Public key of the Ansible control node, so configuration management can reach
+# the instance once Terraform has created it.
+#   on the control node:  cat ~/.ssh/id_ed25519.pub
+ansible_control_public_key = "ssh-ed25519 AAAA... ansible-control@host"
+
+# ---- Identity and placement -------------------------------------------------
+
+# The training AWS account is shared between students: put your name here, or
+# you will collide with a classmate on the security group and key pair names.
+project = "tp-iac-regis"
+owner   = "Blazefive"
+
+region                   = "eu-west-3" # Paris
+availability_zone_suffix = "a"         # -> eu-west-3a
+
+# ---- Network ----------------------------------------------------------------
+
+vpc_cidr           = "10.20.0.0/16"
+public_subnet_cidr = "10.20.1.0/24"
+
+# ---- Compute ----------------------------------------------------------------
+
+# t2.micro: the only type covered by the legacy 750 h/month free tier.
+instance_type       = "t2.micro"
+root_volume_type    = "gp3"
+root_volume_size_gb = 10
+
+ssh_public_key_path = "~/.ssh/tp2_ed25519.pub"
+
+# ---- Image ------------------------------------------------------------------
+
+# 099720109477 is Canonical. Never resolve an AMI without pinning its owner:
+# the name filter alone can be satisfied by anyone.
+ami_owner_id     = "099720109477"
+ami_name_pattern = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+
+# ---- Not configurable, and that is the point --------------------------------
+#
+# Root volume encryption, http_tokens = "required" and the metadata hop limit are
+# hardcoded in main.tf. A security control exposed as a variable becomes
+# optional, and an optional control with an unsafe provider default is exactly
+# how misconfiguration gets industrialised.
