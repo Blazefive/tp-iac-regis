@@ -150,6 +150,14 @@ Aucune intervention entre les étapes. Après exécution : aucune instance, aucu
 | Règle SSH temporaire pour la seule IP du runner, révoquée en `if: always()` | les runners ont des adresses dynamiques ; ouvrir 22 au monde annulerait l'exercice |
 | Clé publique dérivée de la privée | un seul secret, aucune dérive possible |
 | Secrets hors du dépôt | `terraform.tfvars`, `backend.hcl` et l'inventaire sont ignorés ; `gitleaks` ne trouve rien |
+| Paramètres sensibles en **secrets**, pas en variables de dépôt | sur un dépôt public les journaux le sont aussi, et GitHub ne masque que les secrets |
+
+**Note sur les journaux.** Les archives de journaux des exécutions ont été purgées. `ADMIN_CIDR` et
+`VPC_ID` étaient au départ des *variables* de dépôt : GitHub ne masquant que les **secrets**, l'adresse
+IP personnelle de l'administrateur apparaissait en clair 35 fois par exécution dans des journaux
+publics. Les deux valeurs sont passées en secrets et l'historique a été purgé. Les exécutions, leurs
+identifiants et la conclusion de chaque étape — les seules données citées ici comme preuve — restent
+consultables.
 
 **Limite assumée** : l'OIDC est impossible. Il faudrait un rôle IAM avec relation de confiance sur
 `token.actions.githubusercontent.com`, or l'utilisateur de ce TP n'a aucune permission IAM. Des clés
