@@ -128,7 +128,13 @@ jobs:
       && github.event_name == 'workflow_dispatch'
       && (needs.validate.result == 'success' || inputs.action == 'detruire')
     runs-on: ubuntu-latest
-    environment: aws-dev # a required reviewer here gates the apply
+    # The environment carries a deployment branch policy limited to protected
+    # branches, so only main can reach the AWS secrets. workflow_dispatch offers
+    # a branch selector and accepts any ref, and a condition written here would
+    # be no defence: it lives in the file, which the chosen branch can edit. The
+    # policy lives on the repository instead, out of reach of the branch it
+    # gates. This is also where a required reviewer would be added.
+    environment: aws-dev
     outputs:
       ip: ${{ steps.inventory.outputs.ip }}
     steps:
